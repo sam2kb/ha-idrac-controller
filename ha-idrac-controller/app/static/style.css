@@ -8,8 +8,6 @@ a:hover { text-decoration: underline; }
 button, input, select { font: inherit; }
 button, a, input, select, summary { -webkit-tap-highlight-color: transparent; }
 :focus-visible { outline: 3px solid #81a6f5; outline-offset: 3px; }
-.skip-link { position: fixed; top: -80px; left: 12px; z-index: 10; background: white; padding: 12px; border: 1px solid var(--accent); border-radius: 8px; }
-.skip-link:focus { top: 8px; }
 .app-header { background: var(--surface); border-bottom: 1px solid var(--line); }
 .header-inner { max-width: 1240px; min-height: 78px; padding: 0 32px; margin: auto; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
 .brand { display: inline-flex; align-items: center; gap: 12px; color: var(--ink); font-size: 18px; letter-spacing: -.35px; white-space: nowrap; }
@@ -31,6 +29,8 @@ p { margin-bottom: 16px; }
 .eyebrow { margin-bottom: 8px; color: var(--muted); font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: 1.25px; }
 .page-description, .section-heading p { color: var(--muted); margin: 0; font-size: 14px; }
 .refresh-label { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.refresh-label.update-failed { color: #8a5109; }
+.refresh-label.update-failed .refresh-dot { background: #b67a18; }
 .refresh-dot { height: 6px; width: 6px; border-radius: 50%; background: #8b9bb2; }
 .panel, .container { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 3px 14px #22365b04; min-width: 0; }
 .server-grid { display: grid; gap: 24px; }

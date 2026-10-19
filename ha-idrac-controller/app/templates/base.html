@@ -5,7 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light">
     <title>{% block title %}iDRAC Controller{% endblock %}</title>
-    <link rel="stylesheet" href="{{ root_prefix|default('') }}static/style.css?v=1.1.0">
+    <style>
+        .skip-link { position: fixed; top: 8px; left: 12px; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+        .skip-link:focus-visible { width: auto; height: auto; clip-path: none; z-index: 10; padding: 12px; color: #245acb; background: #fff; border: 1px solid #245acb; border-radius: 8px; }
+        {{ ui_styles|safe }}
+    </style>
     {% block head %}{% endblock %}
 </head>
 <body>
@@ -20,7 +24,7 @@
             <a href="{{ root_prefix|default('') }}servers" {% if active_page == 'servers' %}aria-current="page"{% endif %}>Servers</a>
         </nav>
     </div></header>
-    <main class="main-container {% block main_class %}{% endblock %}" id="main-content">
+    <main class="main-container {% block main_class %}{% endblock %}" id="main-content" tabindex="-1">
         {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}<ul class="flashes" aria-label="Notifications">
             {% for category, message in messages %}<li class="{{ category }}" role="status">{{ message }}</li>{% endfor %}

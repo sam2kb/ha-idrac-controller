@@ -1,3 +1,15 @@
+## 1.1.1 - 2026-10-19
+
+- Replace timed full-page reloads with background reading updates. Preserve
+  existing cards, keyboard focus, scroll position and expanded sensor sections.
+- Include the shared theme in the initial HTML on every page to prevent an
+  unstyled flash during navigation or form submission. Show Skip to content
+  only on keyboard focus, even before external assets load.
+- Retain readings with a retry notice when updates fail, bound request timeouts,
+  and pause polling in hidden pages. Resume after returning or browser back.
+- Read status under the writer's lock; return a retryable error for failed reads
+  instead of temporarily clearing the dashboard.
+
 ## 1.1.0 - 2026-10-19
 
 - Publish the light UI refresh with responsive dashboards, grouped settings and

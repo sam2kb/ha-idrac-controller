@@ -453,3 +453,75 @@ def test_shared_navigation_and_assets_stay_inside_ingress(web, prefix, path):
         assert resolved.path.startswith(prefix + "/")
         if tag in ("link", "script"):
             assert client.get(resolved.path.removeprefix(prefix)).status_code == 200
+
+
+
+def test_background_dashboard_fragment_is_read_only_escaped_and_not_cached(web, monkeypatch):
+    client, config_path = web
+    before = config_path.read_bytes()
+    monkeypatch.setattr(web_server, "load_all_servers_status", lambda **kwargs: [{
+        "alias": '<script>alert("fixture")</script>', "ip": "127.0.0.1", "last_updated": "fixture",
+        "hottest_cpu_temp_c": 0, "inlet_temp_c": None, "exhaust_temp_c": None,
+        "power_consumption_watts": 0, "cpu_temps_c": [], "actual_fan_rpms": [],
+    }])
+    response = client.get("/dashboard/readings")
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    text = response.get_data(as_text=True)
+    assert 'id="dashboard-readings" data-dashboard-readings' in text
+    assert '&lt;script&gt;' in text and '<script>' not in text
+    assert '0.0<span class="metric-unit">' in text
+    assert '<html' not in text and 'http-equiv="refresh"' not in text
+    assert config_path.read_bytes() == before
+    assert client.post("/dashboard/readings").status_code == 405
+
+
+def test_dashboard_uses_background_updates_without_document_refresh(web):
+    client, _ = web
+    text = client.get("/").get_data(as_text=True)
+    assert 'http-equiv="refresh"' not in text
+    assert 'static/dashboard.js?' in text
+    assert 'id="dashboard-readings"' in text
+    assert text.index('.skip-link:focus-visible') < text.index('</head>')
+    assert 'id="main-content" tabindex="-1"' in text
+
+
+
+@pytest.mark.parametrize("path", ["/", "/servers", "/servers/edit/fixture"])
+def test_theme_is_in_initial_html_without_external_css_round_trip(web, path):
+    client, _ = web
+    text = client.get(path).get_data(as_text=True)
+    head = text.split("</head>")[0]
+    assert '--canvas: #f5f7fb' in head
+    assert 'background: var(--surface)' in head
+    assert 'rel="stylesheet"' not in head
+
+
+def test_failed_status_read_retains_existing_client_readings_via_503(web, monkeypatch, tmp_path):
+    client, _ = web
+    status = tmp_path / "status.json"
+    status.write_text('{"partially written')
+    monkeypatch.setattr(web_server, "STATUS_FILE", str(status))
+    response = client.get("/dashboard/readings")
+    assert response.status_code == 503
+    assert response.headers["Cache-Control"] == "no-store"
+    assert b"dashboard-readings" not in response.data
+    status.write_text('[]')
+    assert client.get("/dashboard/readings").status_code == 200
+
+
+def test_status_json_is_read_under_the_same_lock_as_the_writer(web, monkeypatch, tmp_path):
+    import threading
+    _, _config = web
+    status = tmp_path / "status.json"
+    status.write_text('[]')
+    lock = threading.Lock()
+    monkeypatch.setattr(web_server, "STATUS_FILE", str(status))
+    monkeypatch.setattr(web_server, "status_lock", lock)
+    original = web_server.json.load
+    def guarded_load(stream):
+        assert lock.locked()
+        return original(stream)
+    monkeypatch.setattr(web_server.json, "load", guarded_load)
+    assert web_server.load_all_servers_status(strict=True) == []
+    assert not lock.locked()

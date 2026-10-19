@@ -12,11 +12,21 @@ import logging
 import threading
 import secrets
 import tempfile
-from contextlib import suppress
+from pathlib import Path
+from contextlib import suppress, nullcontext
 
 log = logging.getLogger('werkzeug')
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
+# Ship the theme with the initial HTML so ingress navigation cannot paint an
+# unstyled page while a separate stylesheet request is still pending.
+UI_STYLES = (Path(app.static_folder) / 'style.css').read_text(encoding='utf-8')
+
+
+@app.context_processor
+def ui_context():
+    return {'ui_styles': UI_STYLES}
+
 
 # --- Global paths and locks ---
 STATUS_FILE = None
@@ -153,13 +163,17 @@ def app_status():
     return response
 
 
-def load_all_servers_status():
-    if STATUS_FILE and os.path.exists(STATUS_FILE):
+def load_all_servers_status(*, strict=False):
+    if STATUS_FILE:
         try:
-            with open(STATUS_FILE, 'r') as f:
-                return json.load(f)
+            # The writer uses this same lock; never read a partially written
+            # status file and momentarily replace all readings with an empty page.
+            with status_lock if status_lock is not None else nullcontext():
+                with open(STATUS_FILE, 'r') as f:
+                    return json.load(f)
         except (json.JSONDecodeError, IOError):
-            pass
+            if strict:
+                raise
     return []
 
 
@@ -180,6 +194,18 @@ def index():
     all_statuses = load_all_servers_status()
     all_statuses.sort(key=lambda x: x.get('alias', ''))
     return render_template('index.html', servers=all_statuses)
+
+
+@app.route('/dashboard/readings')
+def dashboard_readings():
+    try:
+        all_statuses = load_all_servers_status(strict=True)
+        all_statuses.sort(key=lambda x: x.get('alias', ''))
+        response = app.make_response(render_template('_dashboard_readings.html', servers=all_statuses))
+    except (json.JSONDecodeError, IOError):
+        response = app.make_response(('Readings temporarily unavailable', 503))
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 @app.route('/servers')
