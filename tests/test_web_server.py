@@ -9,6 +9,7 @@ from app import web_server
 
 @pytest.fixture
 def web(monkeypatch, tmp_path):
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
     config_path = tmp_path / "servers.json"
     server = {
         "alias": "fixture", "idrac_ip": "127.0.0.1",
@@ -150,3 +151,109 @@ def test_new_server_form_selects_dell_auto_and_edit_keeps_saved_custom_mode(web)
     client, config_path = web
     assert selected_cooling_mode(client.get("/servers")) == "auto"
     assert selected_cooling_mode(client.get("/servers/edit/fixture")) == "curve"
+
+
+@pytest.fixture
+def supervisor_self(web, monkeypatch):
+    from unittest.mock import Mock
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "fixture-supervisor-token")
+    connection = Mock()
+    response = connection.getresponse.return_value
+    response.status = 200
+    response.read.return_value = json.dumps({
+        "result": "ok", "data": {"slug": "a85f1537_ha_idrac_controller"},
+    }).encode()
+    factory = Mock(return_value=connection)
+    monkeypatch.setattr(web_server, "HTTPConnection", factory)
+    return *web, factory, connection, response
+
+
+def restart_links(response):
+    from html.parser import HTMLParser
+
+    class LinkParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.links = []
+
+        def handle_starttag(self, tag, attrs):
+            values = dict(attrs)
+            if tag == "a" and values.get("href", "").startswith("/config/"):
+                self.links.append(values)
+
+    parser = LinkParser()
+    parser.feed(response.get_data(as_text=True))
+    return parser.links
+
+
+@pytest.mark.parametrize("prefix", ["", "/api/hassio_ingress/fixture"])
+@pytest.mark.parametrize("slug", ["a85f1537_ha_idrac_controller", "local_ha_idrac_controller", "otherrepo_ha_idrac_controller"])
+def test_saved_message_links_to_installed_app_info_outside_ingress(supervisor_self, prefix, slug):
+    client, config_path, factory, connection, response = supervisor_self
+    response.read.return_value = json.dumps({"result": "ok", "data": {"slug": slug}}).encode()
+    client.post("/servers/add", data={"alias": "link-fixture"},
+                environ_overrides={"SCRIPT_NAME": prefix})
+    page = client.get("/servers", environ_overrides={"SCRIPT_NAME": prefix})
+    links = restart_links(page)
+    assert links == [{"href": f"/config/app/{slug}/info", "target": "_top"}]
+    assert urljoin("https://ha.bit-b.com" + prefix + "/servers", links[0]["href"]) == (
+        f"https://ha.bit-b.com/config/app/{slug}/info")
+    factory.assert_called_once_with("supervisor", timeout=3)
+    connection.request.assert_called_once_with(
+        "GET", "/addons/self/info", headers={"Authorization": "Bearer fixture-supervisor-token"})
+    connection.close.assert_called_once()
+    assert "fixture-supervisor-token" not in page.get_data(as_text=True)
+    assert "fixture-supervisor-token" not in config_path.read_text()
+
+
+def test_missing_supervisor_token_links_to_current_apps_page(supervisor_self, monkeypatch):
+    client, config_path, factory, connection, response = supervisor_self
+    monkeypatch.delenv("SUPERVISOR_TOKEN")
+    client.post("/servers/add", data={"alias": "link-fixture"})
+    assert restart_links(client.get("/servers")) == [{"href": "/config/apps", "target": "_top"}]
+    factory.assert_not_called()
+
+
+@pytest.mark.parametrize("body", [
+    b"not json", b"[]", b'{"result":"error"}', b'{"result":"ok","data":[]}',
+    b'{"result":"ok","data":{}}',
+    json.dumps({"result": "ok", "data": {"slug": "../other"}}).encode(),
+    json.dumps({"result": "ok", "data": {"slug": "bad<script>alert(1)</script>"}}).encode(),
+    json.dumps({"result": "ok", "data": {"slug": None}}).encode(),
+])
+def test_bad_self_metadata_falls_back_without_breaking_save(supervisor_self, body):
+    client, config_path, factory, connection, response = supervisor_self
+    response.read.return_value = body
+    client.post("/servers/add", data={"alias": "link-fixture"})
+    assert any(server["alias"] == "link-fixture" for server in json.loads(config_path.read_text()))
+    assert restart_links(client.get("/servers")) == [{"href": "/config/apps", "target": "_top"}]
+    connection.close.assert_called_once()
+
+
+@pytest.mark.parametrize("status", [302, 401, 404, 503])
+def test_unavailable_self_metadata_falls_back(supervisor_self, status):
+    client, config_path, factory, connection, response = supervisor_self
+    response.status = status
+    client.post("/servers/add", data={"alias": "link-fixture"})
+    assert restart_links(client.get("/servers")) == [{"href": "/config/apps", "target": "_top"}]
+    response.read.assert_not_called()
+    connection.request.assert_called_once()
+
+
+def test_metadata_timeout_does_not_break_configuration_save(supervisor_self):
+    client, config_path, factory, connection, response = supervisor_self
+    connection.request.side_effect = TimeoutError("fixture-secret-detail")
+    client.post("/servers/add", data={"alias": "link-fixture"})
+    page = client.get("/servers")
+    assert restart_links(page) == [{"href": "/config/apps", "target": "_top"}]
+    assert "fixture-secret-detail" not in page.get_data(as_text=True)
+
+
+def test_failed_save_does_not_offer_restart_link_or_query_metadata(supervisor_self, monkeypatch):
+    client, config_path, factory, connection, response = supervisor_self
+    monkeypatch.setattr(web_server, "SERVERS_CONFIG_FILE", str(config_path.parent))
+    client.post("/servers/add", data={"alias": "link-fixture"})
+    page = client.get("/servers")
+    assert b"Could not write" in page.data
+    assert restart_links(page) == []
+    factory.assert_not_called()

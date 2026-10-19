@@ -63,8 +63,8 @@ servers and a Manage Servers page for adding, editing and deleting them.
 2. Start the app, then click Open Web UI.
 3. Open Manage Servers and add each server: alias, iDRAC address, username,
    password, fan mode and thresholds.
-4. Restart the app after adding or editing servers. The web UI links to the app
-   dashboard for this.
+4. Restart the app after adding or editing servers. The saved message links to the app's
+   Info page, where you can choose Restart.
 
 ## Fan control notes
 

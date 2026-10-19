@@ -1,3 +1,10 @@
+## 1.0.7 - 2026-10-18
+
+- Link the configuration-saved message directly to this app's Home Assistant
+  Info page, where the Restart button is available.
+- Discover the installed app ID from Supervisor instead of hardcoding a
+  repository prefix. Fall back to the Apps list if metadata is unavailable.
+
 ## 1.0.6 - 2026-10-18
 
 - Default new servers to Dell automatic cooling. Hand control to the iDRAC

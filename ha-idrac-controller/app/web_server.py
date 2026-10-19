@@ -4,6 +4,7 @@ from waitress import serve
 from markupsafe import Markup
 
 from .fan_logic import FAN_MODES, validate_fan_curve
+from http.client import HTTPConnection, HTTPException
 import os
 import re
 import json
@@ -59,18 +60,51 @@ def load_servers_config():
             return []
 
 
+def _app_info_url():
+    """Find this installation's app page without hardcoding a repository hash."""
+    fallback = "/config/apps"
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if not token:
+        return fallback
+    connection = HTTPConnection("supervisor", timeout=3)
+    try:
+        connection.request("GET", "/addons/self/info",
+                           headers={"Authorization": f"Bearer {token}"})
+        response = connection.getresponse()
+        if response.status != 200:
+            return fallback
+        payload = json.loads(response.read(65536))
+        if not isinstance(payload, dict) or payload.get("result") != "ok":
+            return fallback
+        data = payload.get("data")
+        slug = data.get("slug") if isinstance(data, dict) else None
+        if isinstance(slug, str) and re.fullmatch(r"[a-z0-9_]+", slug):
+            return f"/config/app/{slug}/info"
+    except (OSError, HTTPException, ValueError, TypeError):
+        # Metadata is optional. Never log tokens, response bodies or errors.
+        pass
+    finally:
+        connection.close()
+    return fallback
+
+
 def save_servers_config(servers):
     with config_lock:
         try:
             with open(SERVERS_CONFIG_FILE, 'w') as f:
                 json.dump(servers, f, indent=4)
-            restart_url = "/hassio/dashboard"
-            message = Markup(f"Configuration saved! <a href='{restart_url}' target='_top'>Click here to go to the Add-ons dashboard to RESTART</a> for changes to take effect.")
-            flash(message, "success")
-            return True
         except IOError:
             flash("Error: Could not write to config file.", "error")
             return False
+
+    restart_url = _app_info_url()
+    label = "Open HA iDRAC Controller" if restart_url.startswith("/config/app/") else "Open Home Assistant Apps"
+    message = Markup(
+        'Configuration saved. <a href="{}" target="_top">{}</a> '
+        'and restart the app to apply changes.'
+    ).format(restart_url, label)
+    flash(message, "success")
+    return True
 
 
 def load_all_servers_status():

@@ -87,8 +87,8 @@ Most settings live in the app's web UI.
 2.  Start the app, then click Open Web UI.
 3.  Open Manage Servers and use the Add New Server form. It is pre-filled with
     the global defaults.
-4.  Restart the app after adding or editing servers. The web UI links to the app
-    dashboard for this.
+4.  Restart the app after adding or editing servers. The saved message links to the app's
+    Info page, where you can choose Restart.
 
 ### Automatic MQTT setup
 
@@ -113,7 +113,7 @@ connection settings here.
 The dashboard shows live data for every enabled server and refreshes itself.
 The Manage Servers page adds, edits and deletes servers, and sets the fan mode
 and thresholds for each one. After saving a server, the page offers a link to
-the app dashboard to restart it.
+the app's Info page to restart it.
 
 ## Entities in Home Assistant
 
