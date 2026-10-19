@@ -6,7 +6,7 @@ import signal
 import threading
 import time
 
-from .fan_logic import SimpleFanState, clamp_speed, validate_fan_config
+from .fan_logic import SimpleFanState, clamp_speed, validate_fan_config, validate_fan_curve
 from .ipmi_manager import IPMIManager
 from .mqtt_client import MqttClient
 from .pid_controller import PIDController
@@ -130,6 +130,7 @@ class ServerWorker:
             serial_number=self.server_info.get("serial"),
             sw_version=self.server_info.get("firmware"),
         )
+        self.mqtt.message_callback = self._on_mqtt_message
         self.mqtt.on_connect_callback = self._on_mqtt_connected
 
         # MQTT being down must not stop IPMI monitoring/control. Try once at
@@ -164,9 +165,13 @@ class ServerWorker:
 
             raw_temp_data = self.ipmi.retrieve_temperatures_raw()
             if raw_temp_data is None:
+                self._log("warning", "Could not read temperature SDR data; manual cooling is unsafe.")
+                target_fan_speed = "Monitor only"
+                if self.config.get('fan_control_enabled', True):
+                    target_fan_speed = self._use_dell_auto("temperature read failed")
+                self._update_status({"cpu_temps": []}, [], None, [], target_fan_speed)
                 if self.mqtt.is_connected:
                     self.mqtt.publish(self.mqtt.availability_topic, "offline", retain=True)
-                self._log("warning", "Could not read temperature SDR data; skipping cycle.")
                 self._sleep(60)
                 continue
 
@@ -189,13 +194,11 @@ class ServerWorker:
                 target_fan_speed = "Dell Auto (refused)"
             elif hottest_cpu is None:
                 self._log("warning", "No CPU temperature sensor found; handing fans back to the iDRAC for safety.")
-                self.ipmi.apply_dell_fan_control_profile()
-                target_fan_speed = "Dell Auto (no CPU sensor)"
+                target_fan_speed = self._use_dell_auto("no CPU sensor")
             else:
                 crit_thresh = self.fan_cfg["critical"]
                 if self.fan_state.should_use_auto(hottest_cpu, crit_thresh):
-                    self.ipmi.apply_dell_fan_control_profile()
-                    target_fan_speed = "Dell Auto"
+                    target_fan_speed = self._use_dell_auto()
                 else:
                     fan_mode = self.config.get('fan_mode', 'simple')
 
@@ -219,8 +222,12 @@ class ServerWorker:
                                 target_fan_speed = "Dell Auto (fan command failed)"
 
                     elif fan_mode == 'curve':
-                        fan_curve = self.config.get('fan_curve', [])
-                        if len(fan_curve) >= 2:
+                        try:
+                            fan_curve = validate_fan_curve(self.config.get('fan_curve', []))
+                        except ValueError as error:
+                            self._log("warning", f"Invalid fan curve: {error} Handing fans back to Dell.")
+                            target_fan_speed = self._use_dell_auto("invalid fan curve")
+                        else:
                             lower, upper = fan_curve[0], fan_curve[-1]
                             for i in range(len(fan_curve) - 1):
                                 if fan_curve[i]['temp'] <= hottest_cpu < fan_curve[i + 1]['temp']:
@@ -241,33 +248,45 @@ class ServerWorker:
                             if self.ipmi.apply_user_fan_control_profile(target_fan_speed) is None:
                                 target_fan_speed = "Dell Auto (fan command failed)"
 
-            status_data = {
-                "hottest_cpu_temp": hottest_cpu,
-                "inlet_temp": temps.get('inlet_temp'),
-                "exhaust_temp": temps.get('exhaust_temp'),
-                "power": power,
-                "target_fan_speed": None if isinstance(target_fan_speed, str) else target_fan_speed,
-                "cpus": temps.get('cpu_temps', []),
-                "fans": fans,
-                "psus": psu_statuses,
-            }
-            with status_lock:
-                ALL_SERVERS_STATUS[self.alias] = {
-                    "alias": self.alias,
-                    "ip": self.config['idrac_ip'],
-                    "last_updated": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
-                    "hottest_cpu_temp_c": hottest_cpu,
-                    "inlet_temp_c": temps.get('inlet_temp'),
-                    "exhaust_temp_c": temps.get('exhaust_temp'),
-                    "power_consumption_watts": power,
-                    "target_fan_speed_percent": target_fan_speed,
-                    "cpu_temps_c": temps.get('cpu_temps', []),
-                    "actual_fan_rpms": fans,
-                    "psu_statuses": psu_statuses,
-                }
-
-            self._publish_mqtt_data(status_data)
+            self._update_status(temps, fans, power, psu_statuses, target_fan_speed)
             self._sleep(max(0.1, self.global_opts["check_interval_seconds"] - (time.time() - start_time)))
+
+    def _use_dell_auto(self, reason=None):
+        """Never claim automatic cooling unless the iDRAC accepted hand-back."""
+        if self.ipmi.apply_dell_fan_control_profile() is None:
+            self._log("error", "Could not restore Dell automatic fan control; cooling mode is unknown. "
+                               "Will retry on the next unsafe control cycle.")
+            return "Unknown (Dell auto hand-back failed)"
+        return f"Dell Auto ({reason})" if reason else "Dell Auto"
+
+    def _update_status(self, temps, fans, power, psu_statuses, target_fan_speed):
+        hottest_cpu = max(temps['cpu_temps']) if temps['cpu_temps'] else None
+        status_data = {
+            "hottest_cpu_temp": hottest_cpu,
+            "inlet_temp": temps.get('inlet_temp'),
+            "exhaust_temp": temps.get('exhaust_temp'),
+            "power": power,
+            "target_fan_speed": None if isinstance(target_fan_speed, str) else target_fan_speed,
+            "cpus": temps.get('cpu_temps', []),
+            "fans": fans,
+            "psus": psu_statuses,
+        }
+        with status_lock:
+            ALL_SERVERS_STATUS[self.alias] = {
+                "alias": self.alias,
+                "ip": self.config['idrac_ip'],
+                "last_updated": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
+                "hottest_cpu_temp_c": hottest_cpu,
+                "inlet_temp_c": temps.get('inlet_temp'),
+                "exhaust_temp_c": temps.get('exhaust_temp'),
+                "power_consumption_watts": power,
+                "target_fan_speed_percent": target_fan_speed,
+                "cpu_temps_c": temps.get('cpu_temps', []),
+                "actual_fan_rpms": fans,
+                "psu_statuses": psu_statuses,
+            }
+
+        self._publish_mqtt_data(status_data)
 
     def _sleep(self, seconds):
         """Sleep in small steps so SIGTERM can run cleanup promptly."""

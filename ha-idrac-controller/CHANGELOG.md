@@ -1,3 +1,13 @@
+## 1.0.4 - 2026-10-19
+
+- Attempt Dell automatic fan control when temperature polling fails. Clear
+  stale readings and report failed hand-back attempts.
+- Connect the MQTT shutdown handler before connecting to the broker.
+- Preserve curve points after rows are deleted, reject unusable curves before
+  saving, and restore Dell automatic control for invalid stored curves.
+- Fix server add/delete and error redirects through Home Assistant ingress.
+- Add worker and web-route regression tests to CI.
+
 ## 1.0.2 - 2026-10-19
 
 - Add an app icon and logo for the Home Assistant app store.

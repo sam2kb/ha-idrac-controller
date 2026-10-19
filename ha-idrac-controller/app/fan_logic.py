@@ -92,3 +92,20 @@ def validate_fan_config(low_temp_c, critical_temp_c, base_speed, high_speed):
         "high": high,
         "warnings": warnings,
     }
+
+
+def validate_fan_curve(points):
+    """Return sorted curve points or reject a profile that cannot be used."""
+    if not isinstance(points, list) or len(points) < 2:
+        raise ValueError("A fan curve needs at least two points.")
+    try:
+        curve = [{"temp": int(point["temp"]), "speed": int(point["speed"])}
+                 for point in points]
+    except (KeyError, TypeError, ValueError, OverflowError) as error:
+        raise ValueError("Each curve point needs a whole-number temperature and speed.") from error
+    if any(not MIN_FAN_PERCENT <= point["speed"] <= 100 for point in curve):
+        raise ValueError(f"Curve speeds must be between {MIN_FAN_PERCENT} and 100 percent.")
+    curve.sort(key=lambda point: point["temp"])
+    if any(left["temp"] == right["temp"] for left, right in zip(curve, curve[1:])):
+        raise ValueError("Curve temperatures must be distinct.")
+    return curve

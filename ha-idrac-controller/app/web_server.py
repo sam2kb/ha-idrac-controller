@@ -2,7 +2,10 @@
 from flask import Flask, render_template, request, redirect, flash
 from waitress import serve
 from markupsafe import Markup
+
+from .fan_logic import validate_fan_curve
 import os
+import re
 import json
 import logging
 import threading
@@ -26,6 +29,23 @@ def _int_field(form, name, default):
         return int(form.get(name, default))
     except (TypeError, ValueError):
         return default
+
+
+def _parse_fan_curve(form):
+    # Removed rows leave gaps in field indexes. Parse all submitted rows.
+    indexes = sorted({
+        int(match.group(1))
+        for key in form
+        if (match := re.fullmatch(r"curve_(?:temp|speed)_(\d+)", key))
+    })
+    points = []
+    for index in indexes:
+        temp = form.get(f"curve_temp_{index}")
+        speed = form.get(f"curve_speed_{index}")
+        if not temp and not speed:
+            continue
+        points.append({"temp": temp, "speed": speed})
+    return validate_fan_curve(points)
 
 
 def load_servers_config():
@@ -94,10 +114,10 @@ def add_server():
     new_alias = (request.form.get('alias') or "").strip()
     if not new_alias:
         flash("Server alias is required.", "error")
-        return redirect('servers')
+        return redirect('../servers')
     if any(s['alias'] == new_alias for s in servers):
         flash(f"Server alias '{new_alias}' already exists.", "error")
-        return redirect('servers')
+        return redirect('../servers')
 
     new_server = {
         "alias": new_alias,
@@ -115,7 +135,7 @@ def add_server():
     }
     servers.append(new_server)
     save_servers_config(servers)
-    return redirect('servers')
+    return redirect('../servers')
 
 
 @app.route('/servers/edit/<alias>')
@@ -131,7 +151,7 @@ def edit_server_form(alias):
         server_to_edit.setdefault('disable_pcie_cooling_response', False)
         return render_template('edit_server.html', server=server_to_edit)
     flash(f"Server '{alias}' not found.", "error")
-    return redirect('servers')
+    return redirect('../../servers')
 
 
 @app.route('/servers/update/<alias>', methods=['POST'])
@@ -142,6 +162,15 @@ def update_server(alias):
         flash(f"Server '{alias}' not found.", "error")
         return redirect('../../servers')
 
+    fan_mode = request.form.get('fan_mode') or 'simple'
+    fan_curve = server_to_update.get('fan_curve', [])
+    if fan_mode == 'curve':
+        try:
+            fan_curve = _parse_fan_curve(request.form)
+        except ValueError as error:
+            flash(f"Invalid fan curve: {error}", "error")
+            return redirect('../../servers')
+
     server_to_update['idrac_ip'] = (request.form.get('idrac_ip') or "").strip()
     server_to_update['idrac_username'] = request.form.get('idrac_username') or "root"
     new_password = request.form.get('idrac_password')
@@ -151,7 +180,7 @@ def update_server(alias):
     server_to_update['fan_control_enabled'] = request.form.get('fan_control_enabled') == 'true'
     server_to_update['disable_pcie_cooling_response'] = request.form.get('disable_pcie_cooling_response') == 'true'
 
-    server_to_update['fan_mode'] = request.form.get('fan_mode') or 'simple'
+    server_to_update['fan_mode'] = fan_mode
 
     server_to_update['base_fan_speed_percent'] = _int_field(request.form, 'base_fan_speed_percent', 20)
     server_to_update['low_temp_threshold'] = _int_field(request.form, 'low_temp_threshold', 45)
@@ -165,20 +194,7 @@ def update_server(alias):
         "kd": float(request.form.get('pid_kd') or 0.1),
     }
 
-    fan_curve = []
-    i = 0
-    while True:
-        temp = request.form.get(f'curve_temp_{i}')
-        speed = request.form.get(f'curve_speed_{i}')
-        if temp and speed:
-            try:
-                fan_curve.append({'temp': int(temp), 'speed': int(speed)})
-            except ValueError:
-                flash(f"Invalid fan curve value at point {i + 1}; it was ignored.", "error")
-            i += 1
-        else:
-            break
-    server_to_update['fan_curve'] = sorted(fan_curve, key=lambda p: p['temp'])
+    server_to_update['fan_curve'] = fan_curve
 
     save_servers_config(servers)
     return redirect('../../servers')
@@ -192,7 +208,7 @@ def delete_server(alias):
         save_servers_config(servers_to_keep)
     else:
         flash(f"Server '{alias}' not found.", "error")
-    return redirect('../servers')
+    return redirect('../../servers')
 
 
 def run_web_server(port, status_file_path, lock):

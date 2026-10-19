@@ -99,12 +99,16 @@ case, and the configured profile is applied again.
 ## Development
 
 ```sh
+python -m pip install pytest -r ha-idrac-controller/app/requirements.txt
 python -m pytest -q
 ```
 
-The tests need no iDRAC, Flask or paho. They cover the SDR parsers, fan RPM,
-power and PSU parsing, the fan floor and the hysteresis logic. GitHub Actions
-runs the same suite on every push.
+The tests use the app dependencies but need no iDRAC or MQTT broker. They
+cover the SDR parsers, fan RPM, power and PSU parsing, the fan floor and
+hysteresis, temperature-read failures, MQTT shutdown dispatch, curve editing
+and validation, and redirects through Home Assistant ingress. Subprocess and
+network calls are blocked during tests. GitHub Actions runs the same suite
+on Python 3.14 for every push.
 
 ## Credits
 

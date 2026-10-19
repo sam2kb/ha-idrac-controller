@@ -1,29 +1,8 @@
-"""MQTT discovery payload tests, with paho replaced by a tiny stub."""
+"""MQTT discovery payload tests without a broker connection."""
 import json
-import sys
-import types
 
 from conftest import load_module
 
-
-class _FakePahoClient:
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def reconnect_delay_set(self, *args, **kwargs):
-        pass
-
-
-paho = types.ModuleType("paho")
-paho_mqtt = types.ModuleType("paho.mqtt")
-paho_client = types.ModuleType("paho.mqtt.client")
-paho_client.Client = _FakePahoClient
-paho_client.MQTTv311 = 4
-paho.mqtt = paho_mqtt
-paho_mqtt.client = paho_client
-sys.modules.setdefault("paho", paho)
-sys.modules.setdefault("paho.mqtt", paho_mqtt)
-sys.modules.setdefault("paho.mqtt.client", paho_client)
 
 mqtt_mod = load_module("app_mqtt_client", "ha-idrac-controller/app/mqtt_client.py")
 
