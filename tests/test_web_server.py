@@ -257,3 +257,70 @@ def test_failed_save_does_not_offer_restart_link_or_query_metadata(supervisor_se
     assert b"Could not write" in page.data
     assert restart_links(page) == []
     factory.assert_not_called()
+
+
+@pytest.mark.parametrize("path", ["/servers/add", "/servers/update/fixture"])
+@pytest.mark.parametrize("enabled_action", [None, "allow_power_on", "allow_shutdown", "allow_reboot"])
+def test_power_permissions_are_independent_opt_ins_and_can_be_disabled(web, path, enabled_action):
+    client, config_path = web
+    # Existing enabled flags must be removed when the new form opts out.
+    servers = json.loads(config_path.read_text())
+    servers[0].update(allow_power_on=True, allow_shutdown=True, allow_reboot=True)
+    config_path.write_text(json.dumps(servers))
+    form = {"alias": "new", "fan_mode": "auto"}
+    if enabled_action:
+        form[enabled_action] = "true"
+    assert client.post(path, data=form).status_code == 302
+    saved = json.loads(config_path.read_text())[-1 if path.endswith("add") else 0]
+    for option in ("allow_power_on", "allow_shutdown", "allow_reboot"):
+        assert saved[option] is (option == enabled_action)
+
+
+@pytest.mark.parametrize("path", ["/servers", "/servers/edit/fixture"])
+def test_legacy_and_new_server_forms_default_power_actions_to_disabled(web, path):
+    from html.parser import HTMLParser
+
+    class PowerParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.name = None
+            self.selected = {}
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "select":
+                self.name = attrs.get("name")
+            if tag == "option" and self.name and self.name.startswith("allow_") and "selected" in attrs:
+                self.selected[self.name] = attrs["value"]
+
+        def handle_endtag(self, tag):
+            if tag == "select":
+                self.name = None
+
+    client, config_path = web
+    before = config_path.read_bytes()
+    response = client.get(path)
+    assert response.status_code == 200
+    parser = PowerParser()
+    parser.feed(response.get_data(as_text=True))
+    assert parser.selected == {"allow_power_on": "false", "allow_shutdown": "false", "allow_reboot": "false"}
+    assert "without an OS shutdown" in response.get_data(as_text=True)
+    assert config_path.read_bytes() == before
+
+
+
+def test_dashboard_labels_cpu_sockets_and_shows_reported_battery_health(web, monkeypatch):
+    client, config_path = web
+    monkeypatch.setattr(web_server, "load_all_servers_status", lambda: [{
+        "alias": "fixture", "ip": "127.0.0.1", "last_updated": "fixture",
+        "hottest_cpu_temp_c": 35, "inlet_temp_c": 24, "exhaust_temp_c": None,
+        "power_consumption_watts": 70, "target_fan_speed_percent": "Dell Auto",
+        "cpu_temps_c": [35, 32], "cpu_ids": [1, 2], "actual_fan_rpms": [],
+        "batteries": [{"name": "CMOS Battery", "health": "Healthy", "voltage": None}],
+    }])
+    page = client.get("/")
+    assert page.status_code == 200
+    text = page.get_data(as_text=True)
+    assert "CPU1: 35" in text and "CPU2: 32" in text
+    assert "CMOS Battery" in text and "Healthy" in text
+    assert "None V" not in text

@@ -10,6 +10,7 @@ from .fan_logic import CUSTOM_FAN_MODES, SimpleFanState, clamp_speed, validate_f
 from .ipmi_manager import IPMIManager
 from .mqtt_client import MqttClient
 from .mqtt_config import resolve_mqtt_config
+from .power_control import POWER_ACTIONS
 from .pid_controller import PIDController
 from . import web_server
 
@@ -55,9 +56,11 @@ class ServerWorker:
 
         self.server_info = {}
         self.discovered_sensors = set()
+        self._known_batteries = {}
         self._next_mqtt_attempt = 0.0
         self._mqtt_configured = False
         self._pcie_response_disabled = False
+        self._last_power_command = float("-inf")
         self.alive = True
         self.fan_cfg = validate_fan_config(
             self.config.get('low_temp_threshold', 45),
@@ -70,18 +73,50 @@ class ServerWorker:
         print(f"[{level.upper()}] [{self.alias}] {message}", flush=True)
 
     def _on_mqtt_message(self, topic, payload):
-        command_topic = f"{self.mqtt.base_topic}/command/shutdown"
-        if topic == command_topic and payload == "PRESS":
-            self._log("info", "Shutdown command received via MQTT.")
-            self.ipmi.chassis_shutdown()
+        if payload != "PRESS" or not self.running or not running:
+            return
+        for action, description in POWER_ACTIONS.items():
+            if topic != f"{self.mqtt.base_topic}/command/{action}":
+                continue
+            # A hidden entity is not an authorization boundary. Old discovery,
+            # hand-published commands and malformed config must also be denied.
+            if self.config.get(description["option"]) is not True:
+                self._log("warning", f"Ignored disabled power action: {action}.")
+                return
+            now = time.monotonic()
+            if now - self._last_power_command < 30:
+                self._log("warning", "Ignored repeated power command within 30 seconds.")
+                return
+            self._last_power_command = now
+            self._log("warning", f"Power command requested: {description['name']}.")
+            result = getattr(self.ipmi, description["method"])()
+            if result is None:
+                self._log("error", f"Power command failed: {action}; no automatic retry.")
+            else:
+                self._log("info", f"iDRAC accepted power command: {action}.")
+            return
 
     def _on_mqtt_connected(self):
-        """Called on every (re)connect: subscriptions and discovery are lost
-        when the broker restarts, so restore them instead of staying silent
-        until the add-on is restarted."""
-        self._log("info", "MQTT connected; subscribing to command topic and re-publishing discovery.")
-        self.mqtt.subscribe(f"{self.mqtt.base_topic}/command/shutdown")
+        """Refresh discovery and expose only explicitly enabled power actions."""
+        self._log("info", "MQTT connected; refreshing discovery and power permissions.")
         self.discovered_sensors.clear()
+        for action, description in POWER_ACTIONS.items():
+            command_topic = f"{self.mqtt.base_topic}/command/{action}"
+            # Remove any broker-stored command before subscribing on reconnect.
+            self.mqtt.publish(command_topic, "", retain=True, qos=1)
+            slug = f"{action}_button"
+            if self.config.get(description["option"]) is not True:
+                # Includes the legacy, always-on shutdown entity on upgrades.
+                # This runs even if temperature reads fail or the host is off.
+                self.mqtt.remove_discovery("button", slug)
+                continue
+            self.mqtt.subscribe(command_topic)
+            self.mqtt.publish_discovery(
+                component="button", slug=slug, name=description["name"],
+                device_class=description.get("device_class"),
+                icon=description["icon"], cmd_topic=command_topic,
+                entity_category="config",
+            )
 
     def _initialize(self):
         self._log("info", "Initializing server worker...")
@@ -202,6 +237,7 @@ class ServerWorker:
             power_sdr_data = self.ipmi.retrieve_power_sdr_raw()
             power = self.ipmi.parse_power_consumption(power_sdr_data)
             psu_statuses = self.ipmi.get_power_status(power_sdr_data)
+            batteries = self.ipmi.parse_battery_status(power_sdr_data)
 
             hottest_cpu = max(temps['cpu_temps']) if temps['cpu_temps'] else None
             target_fan_speed = "Dell Auto"
@@ -269,7 +305,7 @@ class ServerWorker:
                             if self.ipmi.apply_user_fan_control_profile(target_fan_speed) is None:
                                 target_fan_speed = "Dell Auto (fan command failed)"
 
-            self._update_status(temps, fans, power, psu_statuses, target_fan_speed)
+            self._update_status(temps, fans, power, psu_statuses, target_fan_speed, batteries)
             self._sleep(max(0.1, self.global_opts["check_interval_seconds"] - (time.time() - start_time)))
 
     def _use_dell_auto(self, reason=None):
@@ -280,7 +316,14 @@ class ServerWorker:
             return "Unknown (Dell auto hand-back failed)"
         return f"Dell Auto ({reason})" if reason else "Dell Auto"
 
-    def _update_status(self, temps, fans, power, psu_statuses, target_fan_speed):
+    def _update_status(self, temps, fans, power, psu_statuses, target_fan_speed, batteries=None):
+        # Keep an already discovered battery visible as unknown if a later
+        # read fails or no longer contains it, rather than leaving stale health.
+        self._known_batteries = {name: {"name": name, "health": "Unknown", "voltage": None}
+                                 for name in self._known_batteries}
+        self._known_batteries.update({battery["name"]: battery for battery in (batteries or [])})
+        batteries = list(self._known_batteries.values())
+        cpu_ids = temps.get("cpu_ids", list(range(1, len(temps.get("cpu_temps", [])) + 1)))
         hottest_cpu = max(temps['cpu_temps']) if temps['cpu_temps'] else None
         status_data = {
             "hottest_cpu_temp": hottest_cpu,
@@ -288,7 +331,10 @@ class ServerWorker:
             "exhaust_temp": temps.get('exhaust_temp'),
             "power": power,
             "target_fan_speed": None if isinstance(target_fan_speed, str) else target_fan_speed,
+            "cooling_mode": target_fan_speed if isinstance(target_fan_speed, str) else "Custom control",
             "cpus": temps.get('cpu_temps', []),
+            "cpu_ids": cpu_ids,
+            "batteries": batteries,
             "fans": fans,
             "psus": psu_statuses,
         }
@@ -303,6 +349,8 @@ class ServerWorker:
                 "power_consumption_watts": power,
                 "target_fan_speed_percent": target_fan_speed,
                 "cpu_temps_c": temps.get('cpu_temps', []),
+                "cpu_ids": cpu_ids,
+                "batteries": batteries,
                 "actual_fan_rpms": fans,
                 "psu_statuses": psu_statuses,
             }
@@ -320,15 +368,33 @@ class ServerWorker:
             return
 
         sensors = {
-            "shutdown_button": {"component": "button", "name": "Shutdown Server", "device_class": "restart", "icon": "mdi:server-off"},
+            "cooling_mode": {"component": "sensor", "name": "Cooling status", "entity_category": "diagnostic"},
             "hottest_cpu_temp": {"component": "sensor", "device_class": "temperature", "unit": "°C", "state_class": "measurement", "suggested_display_precision": 1},
             "inlet_temp": {"component": "sensor", "device_class": "temperature", "unit": "°C", "state_class": "measurement", "suggested_display_precision": 1},
             "exhaust_temp": {"component": "sensor", "device_class": "temperature", "unit": "°C", "state_class": "measurement", "suggested_display_precision": 1},
             "power": {"component": "sensor", "device_class": "power", "unit": "W", "state_class": "measurement", "icon": "mdi:flash", "suggested_display_precision": 0},
             "target_fan_speed": {"component": "sensor", "unit": "%", "icon": "mdi:fan-chevron-up", "suggested_display_precision": 0},
         }
-        for i, _ in enumerate(status.get('cpus', [])):
-            sensors[f"cpu_{i}_temp"] = {"component": "sensor", "name": f"CPU {i} Temperature", "device_class": "temperature", "unit": "°C", "state_class": "measurement", "suggested_display_precision": 1}
+        cpu_ids = status.get("cpu_ids", list(range(1, len(status.get("cpus", [])) + 1)))
+        cpu_values = {number - 1: value for number, value in zip(cpu_ids, status.get("cpus", []))}
+        # Preserve old unique IDs: cpu_0_temp is CPU1, cpu_1_temp is CPU2.
+        # Socket numbers come from IPMI, so a missing CPU1 cannot relabel CPU2.
+        cpu_indexes = set(cpu_values) | {
+            int(slug.split("_")[1]) for slug in self.discovered_sensors
+            if re.fullmatch(r"cpu_\d+_temp", slug)
+        }
+        for i in sorted(cpu_indexes):
+            sensors[f"cpu_{i}_temp"] = {"component": "sensor", "name": f"CPU{i + 1} Temperature", "device_class": "temperature", "unit": "°C", "state_class": "measurement", "suggested_display_precision": 1}
+        battery_values = {}
+        for battery in status.get("batteries", []):
+            slug = "battery_" + re.sub(r"[^a-zA-Z0-9_]+", "_", battery["name"]).strip("_").lower()
+            health_slug = f"{slug}_health"
+            sensors[health_slug] = {"component": "sensor", "name": f"{battery['name']} health", "entity_category": "diagnostic", "icon": "mdi:battery-heart-variant"}
+            battery_values[health_slug] = battery["health"]
+            voltage_slug = f"{slug}_voltage"
+            if battery["voltage"] is not None or voltage_slug in self.discovered_sensors:
+                sensors[voltage_slug] = {"component": "sensor", "name": f"{battery['name']} voltage", "device_class": "voltage", "unit": "V", "state_class": "measurement", "entity_category": "diagnostic"}
+                battery_values[voltage_slug] = battery["voltage"]
         for fan in status.get('fans', []):
             sensors[f"fan_{re.sub(r'[^a-zA-Z0-9_]+', '', fan['name']).lower()}_rpm"] = {"component": "sensor", "name": f"{fan['name']} RPM", "unit": "RPM", "icon": "mdi:fan", "suggested_display_precision": 0}
         for psu in status.get('psus', []):
@@ -336,7 +402,6 @@ class ServerWorker:
 
         for slug, desc in sensors.items():
             if slug not in self.discovered_sensors:
-                cmd_topic = f"{self.mqtt.base_topic}/command/shutdown" if desc['component'] == 'button' else None
                 self.mqtt.publish_discovery(
                     component=desc['component'],
                     slug=slug,
@@ -344,7 +409,6 @@ class ServerWorker:
                     device_class=desc.get('device_class'),
                     unit=desc.get('unit'),
                     icon=desc.get('icon'),
-                    cmd_topic=cmd_topic,
                     state_class=desc.get('state_class'),
                     entity_category=desc.get('entity_category'),
                     suggested_display_precision=desc.get('suggested_display_precision'),
@@ -353,12 +417,14 @@ class ServerWorker:
 
             if desc['component'] == 'sensor':
                 value = None
-                if slug.startswith('fan_'):
+                if slug in battery_values:
+                    value = battery_values[slug]
+                elif slug.startswith('fan_'):
                     value = next((f['rpm'] for f in status['fans']
                                   if f"fan_{re.sub(r'[^a-zA-Z0-9_]+', '', f['name']).lower()}_rpm" == slug), None)
                 elif slug.startswith('cpu_'):
                     index = int(slug.split('_')[1])
-                    value = status['cpus'][index] if index < len(status['cpus']) else None
+                    value = cpu_values.get(index)
                 else:
                     value = status.get(slug)
                 self.mqtt.publish_state('sensor', slug, value)

@@ -19,6 +19,7 @@ class MqttClient:
 
         self.base_topic = "ha_idrac_controller"
         self.availability_topic = f"{self.base_topic}/status"
+        self.connection_topic = f"{self.base_topic}/connection"
         self.device_info_dict = None
         self.message_callback = None
         self.on_connect_callback = None
@@ -49,6 +50,7 @@ class MqttClient:
         safe_alias = re.sub(r'[^a-zA-Z0-9_-]+', '_', server_alias)
         self.base_topic = f"ha_idrac_controller/{safe_alias}"
         self.availability_topic = f"{self.base_topic}/status"
+        self.connection_topic = f"{self.base_topic}/connection"
         self.device_info_dict = {
             "identifiers": [f"idrac_controller_{safe_alias}"],
             "name": f"iDRAC ({server_alias})",
@@ -66,6 +68,7 @@ class MqttClient:
         if rc == 0:
             self._log("info", f"Connected successfully to broker {self.broker_address}:{self.port}")
             self.is_connected = True
+            self.publish(self.connection_topic, "online", retain=True)
             self.publish(self.availability_topic, "online", retain=True)
             if self.on_connect_callback:
                 try:
@@ -81,8 +84,17 @@ class MqttClient:
         self.is_connected = False
 
     def _on_message(self, client, userdata, msg):
+        # Power commands must never replay when a subscription is restored.
+        if getattr(msg, "retain", False):
+            self._log("warning", "Ignored retained MQTT command.")
+            return
+        try:
+            payload = msg.payload.decode("utf-8")
+        except UnicodeDecodeError:
+            self._log("warning", "Ignored MQTT command with invalid text encoding.")
+            return
         if self.message_callback:
-            self.message_callback(msg.topic, msg.payload.decode('utf-8'))
+            self.message_callback(msg.topic, payload)
 
     def connect(self):
         # Once the network loop is running paho reconnects by itself; calling
@@ -91,7 +103,7 @@ class MqttClient:
             return
         self._log("info", f"Attempting to connect to broker {self.broker_address}...")
         try:
-            self.client.will_set(self.availability_topic, payload="offline", qos=1, retain=True)
+            self.client.will_set(self.connection_topic, payload="offline", qos=1, retain=True)
             self.client.connect(self.broker_address, self.port, 60)
             if not self._loop_started:
                 self.client.loop_start()
@@ -113,6 +125,7 @@ class MqttClient:
         if not self.is_connected:
             return
         self.publish(self.availability_topic, "offline", retain=True)
+        self.publish(self.connection_topic, "offline", retain=True)
         self.client.loop_stop()
         self._loop_started = False
         self.client.disconnect()
@@ -160,6 +173,19 @@ class MqttClient:
             }],
         }
 
+        connection_availability = {
+            "topic": self.connection_topic,
+            "payload_available": "online",
+            "payload_not_available": "offline",
+        }
+        if component == "button":
+            # Power-on must remain usable when a powered-off OS has no thermal
+            # readings. Availability here follows the app's MQTT connection.
+            payload["availability"] = [connection_availability]
+        else:
+            payload["availability"].append(connection_availability)
+            payload["availability_mode"] = "all"
+
         if component == 'sensor':
             payload["state_topic"] = f"{self.base_topic}/sensor/{slug}"
             payload["value_template"] = "{{ value_json.state }}"
@@ -174,6 +200,7 @@ class MqttClient:
         elif component == 'button':
             payload["command_topic"] = cmd_topic
             payload["payload_press"] = "PRESS"
+            payload["retain"] = False
 
         if device_class:
             payload["device_class"] = device_class
@@ -185,6 +212,13 @@ class MqttClient:
             payload["entity_category"] = entity_category
 
         self.publish(config_topic, json.dumps(payload), retain=True)
+
+    def remove_discovery(self, component, slug):
+        """Delete a retained config, including entities from earlier versions."""
+        if not self.device_info_dict:
+            return
+        unique_id = f"{self.device_info_dict['identifiers'][0]}_{slug}"
+        self.publish(f"homeassistant/{component}/{unique_id}/config", "", retain=True, qos=1)
 
     def publish_state(self, component, slug, state, attributes=None):
         if not self.is_connected:

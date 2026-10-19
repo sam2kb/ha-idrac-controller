@@ -14,7 +14,8 @@ them through MQTT, and manages fan speed per server.
 - Monitoring: each server becomes an MQTT device with sensors for individual
   CPU temperatures, hottest CPU, inlet and exhaust temperatures, fan RPM, power
   consumption, target fan speed and PSU status.
-- A shutdown button for each server.
+- Optional power-on, graceful shutdown and hard-reset reboot buttons, each
+  disabled by default per server.
 - A web UI through ingress: a live dashboard and a Manage Servers page.
 - MQTT discovery: entities are created automatically.
 
@@ -48,6 +49,15 @@ process list. The Supervisor watchdog probes `/health`, which fails only when
 every server worker has died. The MQTT device carries the iDRAC firmware version
 and service tag. Contradictory thresholds are corrected with a warning, and
 temperatures outside -20 to 125 °C are ignored.
+
+CPU temperatures are labeled CPU1, CPU2 and so on, using the socket number
+reported by IPMI. Existing MQTT unique IDs stay unchanged to preserve automations.
+A missing CPU reading stays unknown and does not shift the other socket's label.
+
+Battery health appears only when the SDR data exposes a battery, such as the
+CMOS battery. Voltage appears only if a numeric voltage is reported. These
+sensors use the existing SDR poll and do not estimate charge percentages.
+An unavailable battery reading is shown as Unknown.
 
 ## Prerequisites
 
@@ -115,11 +125,39 @@ The Manage Servers page adds, edits and deletes servers, and sets the fan mode
 and thresholds for each one. After saving a server, the page offers a link to
 the app's Info page to restart it.
 
+## Server power actions
+
+Power buttons are disabled for every server by default, including servers saved
+before this option existed. In Manage Servers, open Edit and expand Server
+power actions. Enable each action separately, save, then restart this app.
+Only enabled actions appear in the Home Assistant device's configuration controls.
+
+- Power on starts a server that is off.
+- Shut down (graceful) sends an ACPI request for the OS to shut down and power
+  off. The OS must support and handle the request. The app never forces power off.
+- Reboot (hard reset) immediately resets the server without shutting down the
+  OS. Unsaved data can be lost. Use the server's OS for a graceful reboot.
+
+On update and reconnect, the app removes disabled buttons from MQTT discovery,
+including the old shutdown button. Commands for disabled actions are rejected.
+Retained command replays are ignored, old retained commands are cleared before
+subscription, and repeated power commands within 30 seconds are ignored.
+There is no extra confirmation when pressing an enabled Home Assistant button.
+These permissions are independent of cooling control.
+
+The cooling-status sensor reports Dell Auto, Monitor only, custom control, or a
+fallback/error status. Target fan speed is a percentage only when the app sets
+one; it is unknown in automatic mode. An unknown exhaust temperature means the
+app has no usable exhaust reading, rather than a measured zero.
+
 ## Entities in Home Assistant
 
 Each server becomes a device named `iDRAC (<alias>)` with:
 
-- a Shutdown Server button
+- battery health and voltage, when reported by iDRAC
+- a cooling-status sensor
+- power-on, graceful shutdown and hard-reset reboot buttons, when explicitly
+  enabled for that server
 - a PSU problem sensor for each power supply
 - sensors for CPU temperatures, hottest CPU, inlet, exhaust, fan RPM, power and
   target fan speed

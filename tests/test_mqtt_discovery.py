@@ -63,3 +63,34 @@ def test_binary_sensor_can_be_diagnostic():
     assert data["entity_category"] == "diagnostic"
     assert data["payload_on"] == "ON"
     assert data["payload_off"] == "OFF"
+
+
+def test_removing_legacy_button_clears_retained_config():
+    client, captured = make_client()
+    client.remove_discovery("button", "shutdown_button")
+    assert captured[-1] == ("homeassistant/button/idrac_controller_T430_shutdown_button/config", "", True)
+
+
+def test_power_button_commands_are_not_retained_and_can_be_configuration_entities():
+    client, captured = make_client()
+    client.publish_discovery("button", "reboot_button", "Reboot server (hard reset)",
+                             cmd_topic="fixture/command/reboot", device_class="restart",
+                             entity_category="config")
+    payload = json.loads(captured[-1][1])
+    assert payload["retain"] is False
+    assert payload["command_topic"] == "fixture/command/reboot"
+    assert payload["payload_press"] == "PRESS"
+    assert payload["entity_category"] == "config"
+    assert captured[-1][2] is True  # Retain discovery, never the action.
+
+
+
+def test_power_availability_does_not_depend_on_cpu_temperatures():
+    client, captured = make_client()
+    client.publish_discovery("button", "power_on_button", "Power on", cmd_topic="fixture/command/power_on")
+    button = json.loads(captured[-1][1])
+    assert [item["topic"] for item in button["availability"]] == [client.connection_topic]
+    client.publish_discovery("sensor", "cpu_0_temp", "CPU1 Temperature")
+    sensor = json.loads(captured[-1][1])
+    assert [item["topic"] for item in sensor["availability"]] == [client.availability_topic, client.connection_topic]
+    assert sensor["availability_mode"] == "all"

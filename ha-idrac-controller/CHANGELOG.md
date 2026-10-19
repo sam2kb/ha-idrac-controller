@@ -1,3 +1,18 @@
+## 1.0.8 - 2026-10-18
+
+- Disable and hide power actions by default for new and existing servers. Add
+  separate per-server opt-ins for power on, graceful shutdown and hard-reset
+  reboot. Label reboot explicitly as an immediate reset without OS shutdown.
+- Remove disabled buttons from retained MQTT discovery, including the legacy
+  shutdown button. Reject disabled actions and retained command replays, clear
+  old retained commands before subscribing, and suppress repeats for 30 seconds.
+- Add a cooling-status sensor so automatic mode is visible even when the target
+  fan percentage is unknown. Keep missing readings as unknown.
+- Label CPU temperatures CPU1 and CPU2 while preserving existing entity IDs.
+  Keep socket identities stable if readings arrive out of order or disappear.
+- Discover battery health from the existing SDR poll and show voltage only when
+  reported. Show unavailable readings as unknown; do not infer charge levels.
+
 ## 1.0.7 - 2026-10-18
 
 - Link the configuration-saved message directly to this app's Home Assistant

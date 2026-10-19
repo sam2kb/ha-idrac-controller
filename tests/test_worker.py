@@ -41,7 +41,9 @@ def make_worker(monkeypatch, tmp_path):
         item.ipmi.apply_dell_fan_control_profile = Mock(return_value="")
         item.ipmi.get_server_model_info = Mock(return_value={})
         item.ipmi.get_firmware_version = Mock(return_value=None)
-        item.ipmi.chassis_shutdown = Mock()
+        item.ipmi.chassis_shutdown = Mock(return_value="accepted")
+        item.ipmi.chassis_power_on = Mock(return_value="accepted")
+        item.ipmi.chassis_hard_reset = Mock(return_value="accepted")
         item.mqtt.publish = Mock()
         item.mqtt.connect = Mock()
         item.mqtt.subscribe = Mock()
@@ -141,7 +143,7 @@ def test_missing_cpu_and_critical_handback_failures_are_not_reported_as_auto(mak
 
 
 def test_shutdown_handler_is_ready_before_connect_and_dispatches_only_press(make_worker):
-    item = make_worker()
+    item = make_worker(allow_shutdown=True)
     item.global_opts["mqtt_host"] = "fixture"
     item.mqtt.wait_connected = Mock(return_value=True)
     item.discovered_sensors.add("old")
@@ -290,3 +292,178 @@ def test_existing_explicit_custom_modes_remain_active(make_worker, mode):
     item.ipmi.apply_user_fan_control_profile.assert_called_once()
     item.ipmi.apply_dell_fan_control_profile.assert_not_called()
     assert item.config["fan_mode"] == mode
+
+
+@pytest.mark.parametrize("value", [None, False, "false", "true", 1, [], {}])
+def test_power_actions_require_boolean_true_not_truthy_config(make_worker, value):
+    item = make_worker(allow_shutdown=value, allow_reboot=value, allow_power_on=value)
+    item._initialize()
+    item._on_mqtt_connected()
+    item.mqtt.subscribe.assert_not_called()
+    for action in main.POWER_ACTIONS:
+        item._on_mqtt_message(f"{item.mqtt.base_topic}/command/{action}", "PRESS")
+    item.ipmi.chassis_shutdown.assert_not_called()
+    item.ipmi.chassis_hard_reset.assert_not_called()
+    item.ipmi.chassis_power_on.assert_not_called()
+    configs = [(call.args[0], call.args[1]) for call in item.mqtt.publish.call_args_list
+               if call.args[0].startswith("homeassistant/button/")]
+    assert configs == [
+        (f"homeassistant/button/idrac_controller_fixture_{action}_button/config", "")
+        for action in main.POWER_ACTIONS
+    ]
+
+
+@pytest.mark.parametrize("action", list(main.POWER_ACTIONS))
+def test_only_allowed_power_action_is_discovered_subscribed_and_dispatched(make_worker, action):
+    import json
+    description = main.POWER_ACTIONS[action]
+    item = make_worker(**{description["option"]: True})
+    item._initialize()
+    item._on_mqtt_connected()
+    topic = f"{item.mqtt.base_topic}/command/{action}"
+    item.mqtt.subscribe.assert_called_once_with(topic)
+    configs = [json.loads(call.args[1]) for call in item.mqtt.publish.call_args_list
+               if call.args[0].startswith("homeassistant/button/") and call.args[1]]
+    assert len(configs) == 1
+    assert configs[0]["name"] == description["name"]
+    assert configs[0]["entity_category"] == "config"
+    assert configs[0]["retain"] is False
+    assert configs[0].get("device_class") == ("restart" if action == "reboot" else None)
+    for other in main.POWER_ACTIONS:
+        if other != action:
+            item._on_mqtt_message(f"{item.mqtt.base_topic}/command/{other}", "PRESS")
+    for info in main.POWER_ACTIONS.values():
+        getattr(item.ipmi, info["method"]).assert_not_called()
+    item._on_mqtt_message(topic, "PRESS")
+    getattr(item.ipmi, description["method"]).assert_called_once_with()
+    # Duplicate clicks/messages must not restart or shut down the server again.
+    item._on_mqtt_message(topic, "PRESS")
+    getattr(item.ipmi, description["method"]).assert_called_once_with()
+
+
+def test_reconnect_removes_legacy_button_even_when_telemetry_fails(make_worker):
+    item = make_worker()
+    item._initialize()
+    item.mqtt.publish.reset_mock()
+    item._on_mqtt_connected()
+    item._on_mqtt_connected()
+    legacy = "homeassistant/button/idrac_controller_fixture_shutdown_button/config"
+    calls = [call for call in item.mqtt.publish.call_args_list if call.args[0] == legacy]
+    assert len(calls) == 2
+    assert all(call.args[1] == "" and call.kwargs["retain"] is True for call in calls)
+    item.mqtt.subscribe.assert_not_called()
+    item.ipmi.chassis_shutdown.assert_not_called()
+
+
+def test_stale_retained_and_invalid_commands_do_not_reach_power_backend(make_worker):
+    item = make_worker(allow_shutdown=True)
+    item._initialize()
+    topic = f"{item.mqtt.base_topic}/command/shutdown"
+    item.mqtt._on_message(None, None, SimpleNamespace(topic=topic, payload=b"PRESS", retain=True))
+    item.mqtt._on_message(None, None, SimpleNamespace(topic=topic, payload=bytes([255]), retain=False))
+    item.ipmi.chassis_shutdown.assert_not_called()
+    item.mqtt._on_message(None, None, SimpleNamespace(topic=topic, payload=b"PRESS", retain=False))
+    item.ipmi.chassis_shutdown.assert_called_once_with()
+
+
+def test_retained_command_cleared_before_subscribing_and_not_executed(make_worker):
+    item = make_worker(allow_shutdown=True)
+    item._initialize()
+    events = []
+    item.mqtt.publish.side_effect = lambda topic, payload, **kw: events.append(("publish", topic, payload))
+    item.mqtt.subscribe.side_effect = lambda topic: events.append(("subscribe", topic))
+    item._on_mqtt_connected()
+    topic = f"{item.mqtt.base_topic}/command/shutdown"
+    assert events.index(("publish", topic, "")) < events.index(("subscribe", topic))
+    item.ipmi.chassis_shutdown.assert_not_called()
+
+
+def test_stopping_worker_rejects_power_commands(make_worker):
+    item = make_worker(allow_shutdown=True)
+    item.stop()
+    item._on_mqtt_message(f"{item.mqtt.base_topic}/command/shutdown", "PRESS")
+    item.ipmi.chassis_shutdown.assert_not_called()
+
+
+def test_failed_power_command_is_not_automatically_retried(make_worker):
+    item = make_worker(allow_reboot=True)
+    item.ipmi.chassis_hard_reset.return_value = None
+    topic = f"{item.mqtt.base_topic}/command/reboot"
+    item._on_mqtt_message(topic, "PRESS")
+    item._on_mqtt_message(topic, "PRESS")
+    item.ipmi.chassis_hard_reset.assert_called_once_with()
+    assert any(call.args[0] == "error" for call in item._log.call_args_list)
+
+
+def test_auto_cooling_status_publishes_text_without_inventing_fan_percentage(make_worker):
+    import json
+    item = make_worker(fan_mode="auto")
+    del item._publish_mqtt_data  # Exercise real discovery and state publishing.
+    item.mqtt.is_connected = True
+    item._update_status({"cpu_temps": [35, 32], "inlet_temp": 24}, [], 70, [], "Dell Auto")
+    payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+    assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/cooling_mode"])["state"] == "Dell Auto"
+    assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/target_fan_speed"])["state"] is None
+    assert not any(topic.startswith("homeassistant/button/") for topic in payloads)
+
+
+
+def test_cpu_labels_change_without_changing_unique_ids_or_socket_assignment(make_worker):
+    import json
+    item = make_worker()
+    item._initialize()
+    del item._publish_mqtt_data
+    item.mqtt.is_connected = True
+    # Reverse SDR order must still publish each value to its original socket ID.
+    item._update_status({"cpu_temps": [32, 35], "cpu_ids": [2, 1]}, [], 70, [], "Dell Auto")
+    payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+    for index, expected in [(0, 35), (1, 32)]:
+        discovery = json.loads(payloads[f"homeassistant/sensor/idrac_controller_fixture_cpu_{index}_temp/config"])
+        assert discovery["name"] == f"CPU{index + 1} Temperature"
+        assert discovery["unique_id"] == f"idrac_controller_fixture_cpu_{index}_temp"
+        assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/cpu_{index}_temp"])["state"] == expected
+    item.mqtt.publish.reset_mock()
+    item._update_status({"cpu_temps": [32], "cpu_ids": [2]}, [], 70, [], "Dell Auto")
+    payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+    assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/cpu_0_temp"])["state"] is None
+    assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/cpu_1_temp"])["state"] == 32
+
+
+def test_battery_discovery_is_optional_and_failed_reads_clear_stale_health(make_worker):
+    import json
+    item = make_worker()
+    item._initialize()
+    del item._publish_mqtt_data
+    item.mqtt.is_connected = True
+    temperatures = {"cpu_temps": [35]}
+    item._update_status(temperatures, [], 70, [], "Dell Auto")
+    assert not any("/idrac_controller_fixture_battery_" in call.args[0] for call in item.mqtt.publish.call_args_list)
+    battery = {"name": "CMOS Battery", "health": "Healthy", "voltage": 3.1}
+    item._update_status(temperatures, [], 70, [], "Dell Auto", [battery])
+    payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+    slug = "battery_cmos_battery"
+    health = json.loads(payloads[f"homeassistant/sensor/idrac_controller_fixture_{slug}_health/config"])
+    voltage = json.loads(payloads[f"homeassistant/sensor/idrac_controller_fixture_{slug}_voltage/config"])
+    assert health["entity_category"] == "diagnostic"
+    assert "unit_of_measurement" not in health
+    assert "device_class" not in health  # HA battery class means charge percentage.
+    assert voltage["device_class"] == "voltage" and voltage["unit_of_measurement"] == "V"
+    assert main.ALL_SERVERS_STATUS[item.alias]["batteries"] == [battery]
+    item.mqtt.publish.reset_mock()
+    item._update_status(temperatures, [], 70, [], "Dell Auto", [])
+    payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+    assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/{slug}_health"])["state"] == "Unknown"
+    assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/{slug}_voltage"])["state"] is None
+
+
+def test_discrete_battery_health_does_not_invent_voltage(make_worker):
+    item = make_worker()
+    item._initialize()
+    del item._publish_mqtt_data
+    item.mqtt.is_connected = True
+    item._update_status({"cpu_temps": [35]}, [], 70, [], "Dell Auto", [
+        {"name": "CMOS Battery", "health": "Healthy", "voltage": None},
+    ])
+    topics = [call.args[0] for call in item.mqtt.publish.call_args_list]
+    assert any("battery_cmos_battery_health" in topic for topic in topics)
+    assert not any("battery_cmos_battery_voltage" in topic for topic in topics)

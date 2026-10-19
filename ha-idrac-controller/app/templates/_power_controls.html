@@ -1,0 +1,18 @@
+<details style="grid-column: 1 / -1;">
+    <summary>Server power actions (disabled by default)</summary>
+    <p>Enable only the Home Assistant buttons you need for this server.
+       These actions affect the whole server. Save and restart this app to apply changes.</p>
+    <div class="form-grid">
+        {% for action, settings in power_actions.items() %}
+        {% set allowed = server is defined and server.get(settings.option) is sameas true %}
+        <div class="form-group">
+            <label for="{{ settings.option }}">{{ settings.name }}</label>
+            <select id="{{ settings.option }}" name="{{ settings.option }}">
+                <option value="false" {% if not allowed %}selected{% endif %}>Disabled (hide button)</option>
+                <option value="true" {% if allowed %}selected{% endif %}>Enabled (show button)</option>
+            </select>
+            <small>{{ settings.description }}</small>
+        </div>
+        {% endfor %}
+    </div>
+</details>

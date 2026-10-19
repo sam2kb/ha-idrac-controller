@@ -280,7 +280,7 @@ class IPMIManager:
         both "CPU1 Temp" (13G) and "Temp" (12G). `cpu_pattern_str` remains as
         an optional extra name filter for unusual firmware.
         """
-        temps = {"cpu_temps": [], "inlet_temp": None, "exhaust_temp": None}
+        temps = {"cpu_temps": [], "cpu_ids": [], "inlet_temp": None, "exhaust_temp": None}
         if not sdr_data:
             return temps
 
@@ -312,6 +312,11 @@ class IPMIManager:
             if cpu_pattern_str:
                 is_cpu = is_cpu or bool(re.search(cpu_pattern_str, sensor_name, re.IGNORECASE))
             if is_cpu:
+                cpu_name = re.search(r"\bCPU\s*(\d+)\b", sensor_name, re.IGNORECASE)
+                cpu_number = (int(cpu_name.group(1)) if cpu_name else
+                              int(entity.split(".")[1]) if entity.startswith("3.") else
+                              len(temps["cpu_temps"]) + 1)
+                temps["cpu_ids"].append(max(1, cpu_number))
                 temps["cpu_temps"].append(temp_value)
 
         return temps
@@ -392,6 +397,49 @@ class IPMIManager:
             self._log("debug", f"PSU Status for {name}: Fault={data.get('fault', False)} -> Final OK={is_ok}")
 
         return final_status
+
+    def parse_battery_status(self, sdr_data):
+        """Read battery health/voltage from the existing SDR list, when exposed.
+
+        IPMI battery events are Low, Failed and Presence Detected. These are
+        health states, not charge percentages. Unavailable readings stay unknown.
+        """
+        batteries = []
+        for line in (sdr_data or "").splitlines():
+            fields = [part.strip() for part in line.split("|")]
+            if len(fields) != 5 or not re.search(r"\b(?:battery|batt|vbatt|cmos)\b", fields[0], re.IGNORECASE):
+                continue
+            name, _, status, _, reading = fields
+            reading_lower = reading.lower()
+            health = "Unknown"
+            voltage = None
+            voltage_match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(?:Volts?|V)", reading, re.IGNORECASE)
+            if status.lower() not in ("ns", "na", "u"):
+                if re.search(r"\b(?:failed|failure)\b", reading_lower) or status.lower() in ("cr", "nr", "lcr", "ucr", "lnr", "unr"):
+                    health = "Failed"
+                elif status.lower() in ("nc", "lnc", "unc"):
+                    health = "Warning"
+                elif re.search(r"\blow\b", reading_lower):
+                    health = "Low"
+                elif re.search(r"\b(?:absent|missing|not present)\b", reading_lower):
+                    health = "Missing"
+                elif status.lower() == "ok" and ("presence detected" in reading_lower or reading_lower == "ok" or voltage_match):
+                    health = "Healthy"
+                if voltage_match:
+                    try:
+                        voltage = float(voltage_match.group(1))
+                    except ValueError:
+                        pass
+            batteries.append({"name": name, "health": health, "voltage": voltage})
+        return batteries
+
+    def chassis_power_on(self):
+        """Power on the chassis; never toggle, cycle or force power off."""
+        return self._run_ipmi_command(["chassis", "power", "on"], is_raw_command=False)
+
+    def chassis_hard_reset(self):
+        """Immediately reset the chassis without a graceful OS shutdown."""
+        return self._run_ipmi_command(["chassis", "power", "reset"], is_raw_command=False)
 
     def chassis_shutdown(self):
         """Sends a graceful ACPI shutdown command to the server."""

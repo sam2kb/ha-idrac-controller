@@ -32,11 +32,20 @@
                 {% if server.cpu_temps_c %}
                     <p class="temp-list">
                     {% for temp in server.cpu_temps_c %}
-                        <span class="temp-badge">{{ temp }}°C</span>
+                        <span class="temp-badge">CPU{{ server.cpu_ids[loop.index0] if server.cpu_ids is defined else loop.index }}: {{ temp }}°C</span>
                     {% endfor %}
                     </p>
                 {% else %}
                     <p>No CPU temperature data available.</p>
+                {% endif %}
+
+                {% if server.batteries %}
+                <h3>Battery Health</h3>
+                <ul>
+                    {% for battery in server.batteries %}
+                    <li><strong>{{ battery.name }}:</strong> {{ battery.health }}{% if battery.voltage is not none %} ({{ battery.voltage }} V){% endif %}</li>
+                    {% endfor %}
+                </ul>
                 {% endif %}
 
                 <h3>Actual Fan Speeds (RPM)</h3>

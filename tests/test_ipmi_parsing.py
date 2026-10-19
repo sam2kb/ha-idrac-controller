@@ -165,3 +165,60 @@ def test_implausible_temperature_is_ignored():
     sdr = "CPU1 Temp | 01h | ok | 3.1 | 255 degrees C\n" \
           "CPU2 Temp | 02h | ok | 3.2 | 47 degrees C\n"
     assert make_manager().parse_temperatures(sdr)["cpu_temps"] == [47]
+
+
+
+def test_power_methods_use_exact_ipmi_semantics_without_forced_off_or_cycle(monkeypatch):
+    from unittest.mock import Mock, call
+    manager = make_manager()
+    command = Mock(return_value="accepted")
+    monkeypatch.setattr(manager, "_run_ipmi_command", command)
+    assert manager.chassis_shutdown() == "accepted"
+    assert manager.chassis_power_on() == "accepted"
+    assert manager.chassis_hard_reset() == "accepted"
+    assert command.call_args_list == [
+        call(["chassis", "power", "soft"], is_raw_command=False),
+        call(["chassis", "power", "on"], is_raw_command=False),
+        call(["chassis", "power", "reset"], is_raw_command=False),
+    ]
+
+
+
+def test_cpu_socket_ids_follow_ipmi_names_and_12g_entity_instances():
+    manager = make_manager()
+    assert manager.parse_temperatures(SDR_13G)["cpu_ids"] == [1, 2]
+    assert manager.parse_temperatures(SDR_12G)["cpu_ids"] == [1, 2]
+    only_cpu2 = manager.parse_temperatures("CPU2 Temp | 02h | ok | 3.2 | 47 degrees C")
+    assert only_cpu2["cpu_ids"] == [2]
+    assert only_cpu2["cpu_temps"] == [47]
+
+
+def test_battery_health_uses_reported_discrete_states_and_optional_voltage():
+    manager = make_manager()
+    rows = [
+        ("ok", "Presence Detected", "Healthy", None),
+        ("ok", "Presence Detected, Low", "Low", None),
+        ("ok", "Failed, Presence Detected", "Failed", None),
+        ("ok", "Not Present", "Missing", None),
+        ("ok", "3.12 Volts", "Healthy", 3.12),
+        ("lcr", "2.0 Volts", "Failed", 2.0),
+        ("nr", "2.0 Volts", "Failed", 2.0),
+        ("lnc", "2.7 Volts", "Warning", 2.7),
+        ("ns", "No Reading", "Unknown", None),
+        ("ns", "Presence Detected", "Unknown", None),
+        ("ok", "Unrecognized state", "Unknown", None),
+    ]
+    for status, reading, health, voltage in rows:
+        result = manager.parse_battery_status(f"CMOS Battery | 0Fh | {status} | 23.1 | {reading}")
+        assert result == [{"name": "CMOS Battery", "health": health, "voltage": voltage}]
+    assert manager.parse_battery_status(None) == []
+    assert manager.parse_battery_status(ELIST) == []
+    assert manager.parse_battery_status("CMOS Battery | invalid") == []
+
+
+def test_multiple_batteries_are_independent_and_do_not_create_charge_percentages():
+    result = make_manager().parse_battery_status(
+        "CMOS Battery | 0Fh | ok | 23.1 | Presence Detected\n"
+        "RAID Battery | 10h | ok | 23.2 | Low\n")
+    assert [battery["health"] for battery in result] == ["Healthy", "Low"]
+    assert all(set(battery) == {"name", "health", "voltage"} for battery in result)

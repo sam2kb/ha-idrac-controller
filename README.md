@@ -29,9 +29,19 @@ third-party PCIe cards and restores Dell's setting when the app stops.
 
 In Home Assistant, each server becomes an MQTT device with sensors for CPU
 temperatures, hottest CPU, inlet and exhaust, fan RPM, power, target fan speed
-and PSU status. There is also a shutdown button per server. The device carries
+and PSU status. Power on, graceful shutdown and hard-reset reboot buttons are
+optional per server and disabled by default. The device carries
 the iDRAC firmware version and service tag. The web UI shows a dashboard for all
 servers and a Manage Servers page for adding, editing and deleting them.
+
+CPU temperatures are labeled CPU1, CPU2 and so on, using the socket number
+reported by IPMI. Existing MQTT unique IDs stay unchanged to preserve automations.
+A missing CPU reading stays unknown and does not shift the other socket's label.
+
+Battery health appears only when the SDR data exposes a battery, such as the
+CMOS battery. Voltage appears only if a numeric voltage is reported. These
+sensors use the existing SDR poll and do not estimate charge percentages.
+An unavailable battery reading is shown as Unknown.
 
 ## Requirements
 
@@ -65,6 +75,31 @@ servers and a Manage Servers page for adding, editing and deleting them.
    password, fan mode and thresholds.
 4. Restart the app after adding or editing servers. The saved message links to the app's
    Info page, where you can choose Restart.
+
+## Server power actions
+
+Power buttons are disabled for every server by default, including servers saved
+before this option existed. In Manage Servers, open Edit and expand Server
+power actions. Enable each action separately, save, then restart this app.
+Only enabled actions appear in the Home Assistant device's configuration controls.
+
+- Power on starts a server that is off.
+- Shut down (graceful) sends an ACPI request for the OS to shut down and power
+  off. The OS must support and handle the request. The app never forces power off.
+- Reboot (hard reset) immediately resets the server without shutting down the
+  OS. Unsaved data can be lost. Use the server's OS for a graceful reboot.
+
+On update and reconnect, the app removes disabled buttons from MQTT discovery,
+including the old shutdown button. Commands for disabled actions are rejected.
+Retained command replays are ignored, old retained commands are cleared before
+subscription, and repeated power commands within 30 seconds are ignored.
+There is no extra confirmation when pressing an enabled Home Assistant button.
+These permissions are independent of cooling control.
+
+The cooling-status sensor reports Dell Auto, Monitor only, custom control, or a
+fallback/error status. Target fan speed is a percentage only when the app sets
+one; it is unknown in automatic mode. An unknown exhaust temperature means the
+app has no usable exhaust reading, rather than a measured zero.
 
 ## Fan control notes
 
@@ -117,7 +152,7 @@ python -m pytest -q
 
 The tests use the app dependencies but need no iDRAC or MQTT broker. They
 cover the SDR parsers, fan RPM, power and PSU parsing, the fan floor and
-hysteresis, temperature-read failures, MQTT shutdown dispatch, curve editing
+hysteresis, temperature-read failures, power permissions and MQTT replay rejection, curve editing
 and validation, and redirects through Home Assistant ingress. Subprocess and
 network calls are blocked during tests. GitHub Actions runs the same suite
 on Python 3.14 for every push.

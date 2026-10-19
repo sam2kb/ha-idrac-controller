@@ -4,6 +4,7 @@ from waitress import serve
 from markupsafe import Markup
 
 from .fan_logic import FAN_MODES, validate_fan_curve
+from .power_control import POWER_ACTIONS
 from http.client import HTTPConnection, HTTPException
 import os
 import re
@@ -139,7 +140,7 @@ def index():
 @app.route('/servers')
 def manage_servers():
     servers = load_servers_config()
-    return render_template('servers.html', servers=servers, defaults=global_config)
+    return render_template('servers.html', servers=servers, defaults=global_config, power_actions=POWER_ACTIONS)
 
 
 @app.route('/servers/add', methods=['POST'])
@@ -178,6 +179,8 @@ def add_server():
         "high_temp_fan_speed_percent": _int_field(request.form, 'high_temp_fan_speed_percent', 50),
         "critical_temp_threshold": _int_field(request.form, 'critical_temp_threshold', 65),
     }
+    for action in POWER_ACTIONS.values():
+        new_server[action["option"]] = request.form.get(action["option"]) == "true"
     servers.append(new_server)
     save_servers_config(servers)
     return redirect('../servers')
@@ -194,7 +197,7 @@ def edit_server_form(alias):
         server_to_edit.setdefault('target_temp', 55)
         server_to_edit.setdefault('fan_control_enabled', True)
         server_to_edit.setdefault('disable_pcie_cooling_response', False)
-        return render_template('edit_server.html', server=server_to_edit)
+        return render_template('edit_server.html', server=server_to_edit, power_actions=POWER_ACTIONS)
     flash(f"Server '{alias}' not found.", "error")
     return redirect('../../servers')
 
@@ -227,6 +230,9 @@ def update_server(alias):
     server_to_update['enabled'] = request.form.get('enabled') == 'true'
     server_to_update['fan_control_enabled'] = request.form.get('fan_control_enabled') == 'true'
     server_to_update['disable_pcie_cooling_response'] = request.form.get('disable_pcie_cooling_response') == 'true'
+
+    for action in POWER_ACTIONS.values():
+        server_to_update[action["option"]] = request.form.get(action["option"]) == "true"
 
     server_to_update['fan_mode'] = fan_mode
 
