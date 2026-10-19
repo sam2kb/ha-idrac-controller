@@ -1,19 +1,14 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Reload app</title>
-    <link rel="stylesheet" href="../static/style.css">
-    <script src="../static/reload.js" defer></script>
-</head>
-<body>
-    <main class="container" id="reload-app" data-boot-id="{{ boot_id }}" data-reload-token="{{ reload_token }}">
-        <h1>Reload app</h1>
-        <p id="reload-message" role="status">Configuration saved. Reloading the app…</p>
-        <p>This restarts HA iDRAC Controller. Home Assistant and your servers keep running.</p>
-        <p><a href="../servers">Back to Manage Servers</a></p>
-        <noscript>JavaScript is needed to reload here. You can restart the app from Home Assistant Settings.</noscript>
-    </main>
-</body>
-</html>
+{% extends "base.html" %}
+{% set root_prefix = '../' %}
+{% set active_page = 'servers' %}
+{% block title %}Reload app · iDRAC Controller{% endblock %}
+{% block head %}<script src="../static/reload.js" defer></script>{% endblock %}
+{% block content %}
+<section class="panel reload-panel" id="reload-app" data-boot-id="{{ boot_id }}" data-reload-token="{{ reload_token }}">
+    <span class="reload-symbol" aria-hidden="true">↻</span><p class="eyebrow">Applying changes</p><h1>Reload app</h1>
+    <p id="reload-message" role="status">Configuration saved. Reloading the app…</p>
+    <p class="muted">This restarts HA iDRAC Controller. Home Assistant and your servers keep running.</p>
+    <a class="button button-secondary" href="../servers">Back to Manage Servers</a>
+    <noscript>JavaScript is needed to reload here. You can restart the app from Home Assistant Settings.</noscript>
+</section>
+{% endblock %}

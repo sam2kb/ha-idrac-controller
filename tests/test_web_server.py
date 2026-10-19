@@ -404,7 +404,7 @@ def test_advanced_diagnostics_is_off_by_default_without_modifying_saved_legacy_c
     before = config_path.read_bytes()
     page = client.get(path)
     text = page.get_data(as_text=True)
-    assert '<option value="false" selected>Off — important readings only' in text
+    assert '<option value="false" selected>Off (recommended)' in text
     assert "Include advanced diagnostics" in text
     assert config_path.read_bytes() == before
 
@@ -421,3 +421,35 @@ def test_advanced_diagnostics_option_saves_independently_of_power_controls(web, 
     assert server["include_advanced_diagnostics"] is expected
     assert server["fan_control_enabled"] is False
     assert all(server[key] is False for key in ("allow_power_on", "allow_shutdown", "allow_reboot", "allow_power_off", "allow_power_cycle"))
+
+
+
+@pytest.mark.parametrize("prefix", ["", "/api/hassio_ingress/fixture"])
+@pytest.mark.parametrize("path", ["/", "/servers", "/servers/edit/fixture", "/app/reload"])
+def test_shared_navigation_and_assets_stay_inside_ingress(web, prefix, path):
+    from html.parser import HTMLParser
+    client, _ = web
+    with client.session_transaction() as session:
+        session["reload_token"] = "fixture-reload-ticket"
+    class Links(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.urls = []
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            key = "href" if tag in ("a", "link") else "src" if tag == "script" else "action" if tag == "form" else None
+            if key and attrs.get(key):
+                self.urls.append((tag, attrs[key]))
+    response = client.get(path)
+    assert response.status_code == 200
+    text = response.get_data(as_text=True)
+    assert '<meta name="color-scheme" content="light">' in text
+    links = Links()
+    links.feed(text)
+    assert links.urls
+    for tag, url in links.urls:
+        resolved = urlsplit(urljoin("https://ha.example" + prefix + path, url))
+        assert resolved.netloc == "ha.example"
+        assert resolved.path.startswith(prefix + "/")
+        if tag in ("link", "script"):
+            assert client.get(resolved.path.removeprefix(prefix)).status_code == 200

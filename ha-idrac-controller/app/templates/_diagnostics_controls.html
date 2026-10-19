@@ -1,12 +1,11 @@
-<div class="form-group" style="grid-column: 1 / -1;">
+<div class="form-group full-width diagnostics-setting">
     <label for="include_advanced_diagnostics">Include advanced diagnostics</label>
     {% set included = server is defined and server.get('include_advanced_diagnostics') is sameas true %}
     <select id="include_advanced_diagnostics" name="include_advanced_diagnostics">
-        <option value="false" {% if not included %}selected{% endif %}>Off — important readings only (recommended)</option>
-        <option value="true" {% if included %}selected{% endif %}>On — include additional diagnostics</option>
+        <option value="false" {% if not included %}selected{% endif %}>Off (recommended)</option>
+        <option value="true" {% if included %}selected{% endif %}>On</option>
     </select>
-    <small>Keep temperatures, power, cooling, battery health, PSU faults, intrusion,
-        redundancy, and named hardware alarms. Add voltages, currents, detailed
-        power readings, and other signal states when enabled. Applies to both
-        Home Assistant entities and this dashboard after Save and reload app.</small>
+    <small>Important health and power readings stay on. Enable extras for voltage, current,
+        detailed power and other signals. Applies to Home Assistant and this dashboard
+        after Save and reload app.</small>
 </div>

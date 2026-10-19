@@ -1,3 +1,12 @@
+## 1.0.14 - 2026-10-19
+
+- Refresh the web UI with a consistent white/light theme, shared navigation,
+  clearer reading tiles and status labels, and grouped server settings.
+- Improve mobile forms and server actions, add accessible field labels and
+  keyboard focus, and keep tables contained on narrow screens.
+- Show monitor-only guidance when cooling control is disabled. Preserve saved
+  fan profiles, default-disabled power actions, and the existing save/reload flow.
+
 ## 1.0.13 - 2026-10-19
 
 - Fix same-named battery sensors overwriting each other. Ignore disabled spare

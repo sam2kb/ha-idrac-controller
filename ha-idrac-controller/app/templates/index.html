@@ -1,104 +1,50 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>iDRAC Controller Dashboard</title>
-    <link rel="stylesheet" href="static/style.css">
-    <meta http-equiv="refresh" content="15">
-</head>
-<body>
-    <div class="main-container">
-        <h1>HA iDRAC Controller Dashboard</h1>
-        <p><a href="servers">Manage Servers</a></p>
-        {% if servers %}
-            {% for server in servers %}
-            <div class="container server-card">
-                <h2>{{ server.alias }} <small>({{ server.ip }})</small></h2>
-                <p><em>Last updated: <strong>{{ server.last_updated }}</strong></em></p>
-
-                <div class="status-grid">
-                    {% if server.sensor_threshold_status is defined %}<div><strong>Hardware threshold status:</strong> {{ server.sensor_threshold_status or "Unknown" }}</div>{% endif %}
-                    <div><strong>Hottest CPU:</strong> {{ '%.1f'|format(server.hottest_cpu_temp_c) if server.hottest_cpu_temp_c is not none else 'N/A' }}°C</div>
-                    <div><strong>Inlet Temp:</strong> {{ '%.1f'|format(server.inlet_temp_c) if server.inlet_temp_c is not none else 'N/A' }}°C</div>
-                    <div><strong>Exhaust Temp:</strong> {{ '%.1f'|format(server.exhaust_temp_c) if server.exhaust_temp_c is not none else 'N/A' }}°C</div>
-                    <div><strong>Power:</strong> {{ server.power_consumption_watts if server.power_consumption_watts is not none else 'N/A' }} W{% if server.power_capacity_percent is defined and server.power_capacity_percent is not none %} ({{ '%.2f'|format(server.power_capacity_percent) }}% Capacity){% endif %}</div>
-                    {% if server.include_advanced_diagnostics and server.power_capacity_watts is defined and server.power_capacity_watts is not none %}<div><strong>Capacity Reference:</strong> {{ server.power_capacity_watts }} W</div>{% endif %}
-                    {% if server.include_advanced_diagnostics and server.power_warning_watts is defined and server.power_warning_watts is not none %}<div><strong>Warning Threshold:</strong> {{ server.power_warning_watts }} W</div>{% endif %}
-                    {% if server.include_advanced_diagnostics and server.power_failure_watts is defined and server.power_failure_watts is not none %}<div><strong>Failure Threshold:</strong> {{ server.power_failure_watts }} W</div>{% endif %}
-                    {% if server.intrusion_seen %}<div><strong>System Board Intrusion:</strong> {{ 'Unknown' if server.intrusion_active is none else 'Detected' if server.intrusion_active else 'Clear' }}</div>{% endif %}
-                    <div>
-                        <strong>Target Fan Speed:</strong>
-                        {{ server.target_fan_speed_percent }}
-                        {% if server.target_fan_speed_percent is number %}%{% endif %}
-                    </div>
-                </div>
-
-                <h3>All CPU Temperatures</h3>
-                {% if server.cpu_temps_c %}
-                    <p class="temp-list">
-                    {% for temp in server.cpu_temps_c %}
-                        <span class="temp-badge">CPU{{ server.cpu_ids[loop.index0] if server.cpu_ids is defined else loop.index }}: {{ temp }}°C</span>
-                    {% endfor %}
-                    </p>
-                {% else %}
-                    <p>No CPU temperature data available.</p>
-                {% endif %}
-
-                {% if server.batteries %}
-                <h3>Battery Health</h3>
-                <ul>
-                    {% for battery in server.batteries %}
-                    <li><strong>{{ battery.name }}:</strong> {{ battery.health }}{% if server.include_advanced_diagnostics and battery.voltage is not none %} ({{ battery.voltage }} V){% endif %}</li>
-                    {% endfor %}
-                </ul>
-                {% endif %}
-
-                <h3>Actual Fan Speeds (RPM)</h3>
-                {% if server.actual_fan_rpms %}
-                    <ul class="fan-list">
-                    {% for fan in server.actual_fan_rpms %}
-                        <li><strong>{{ fan.name }}:</strong> {{ fan.rpm }} RPM</li>
-                    {% endfor %}
-                    </ul>
-                {% else %}
-                    <p>No fan RPM data available.</p>
-                {% endif %}
-                {% set available_readings = server.sensor_readings|default([])|rejectattr("value", "none")|list %}
-                {% if available_readings %}
-                <h3>{{ "Additional Sensor Readings" if server.include_advanced_diagnostics else "Hardware Health Readings" }}</h3>
-                <div class="readings-scroll">
-                    <table class="readings-table">
-                        <thead><tr><th>Sensor</th><th>Reading</th><th>IPMI status</th></tr></thead>
-                        <tbody>
-                        {% for reading in available_readings %}
-                        <tr><td>{{ reading.name }}</td><td>{{ reading.value }}{% if reading.unit %} {{ reading.unit }}{% endif %}</td><td>{{ reading.status }}</td></tr>
-                        {% endfor %}
-                        </tbody>
-                    </table>
-                </div>
-                {% endif %}
-            </div>
-            {% endfor %}
-        {% else %}
-            <div class="container">
-                <h2>No Server Data</h2>
-                <p>No server data is currently available. Check the add-on logs for more information.</p>
-            </div>
-        {% endif %}
+{% extends "base.html" %}
+{% set active_page = 'overview' %}
+{% block title %}Overview · iDRAC Controller{% endblock %}
+{% block head %}<meta http-equiv="refresh" content="15">{% endblock %}
+{% macro value_badge(value) -%}
+<span class="badge {{ 'badge-ok' if value in ['OK', 'Healthy', 'Clear', 'No alerts', 'No fault reported', 'Fully Redundant'] else 'badge-danger' if value in ['Failed', 'Critical', 'Detected', 'Problem'] else 'badge-warning' if value in ['Warning', 'Low', 'Missing'] else 'badge-neutral' }}">{{ value or 'Unknown' }}</span>
+{%- endmacro %}
+{% block content %}
+<div class="page-heading">
+    <div><p class="eyebrow">Server monitoring</p><h1>Overview</h1><p class="page-description">Temperatures, cooling and hardware readings at a glance.</p></div>
+    <span class="refresh-label"><span class="refresh-dot" aria-hidden="true"></span>Refreshes every 15s</span>
+</div>
+{% if servers %}<div class="server-grid">
+{% for server in servers %}<article class="panel server-card">
+    <header class="server-heading">
+        <div><h2>{{ server.alias }}</h2><span class="server-address">{{ server.ip }}</span></div>
+        <a class="button button-secondary button-small" href="servers/edit/{{ server.alias|urlencode }}" aria-label="Edit {{ server.alias }}">Edit server</a>
+    </header>
+    <div class="metric-grid">
+        <div class="metric"><span class="metric-label">Hottest CPU</span><div class="metric-value">{% if server.hottest_cpu_temp_c is not none %}{{ '%.1f'|format(server.hottest_cpu_temp_c) }}<span class="metric-unit">°C</span>{% else %}<span class="unknown-value">Unknown</span>{% endif %}</div></div>
+        <div class="metric"><span class="metric-label">Power</span><div class="metric-value">{% if server.power_consumption_watts is not none %}{{ server.power_consumption_watts }}<span class="metric-unit">W</span>{% else %}<span class="unknown-value">Unknown</span>{% endif %}</div>{% if server.power_capacity_percent is defined and server.power_capacity_percent is not none %}<span class="metric-note">{{ '%.2f'|format(server.power_capacity_percent) }}% Capacity</span>{% endif %}</div>
+        <div class="metric"><span class="metric-label">Inlet temperature</span><div class="metric-value">{% if server.inlet_temp_c is not none %}{{ '%.1f'|format(server.inlet_temp_c) }}<span class="metric-unit">°C</span>{% else %}<span class="unknown-value">Unknown</span>{% endif %}</div></div>
+        <div class="metric"><span class="metric-label">Cooling</span><div class="metric-value metric-text">{{ server.target_fan_speed_percent if server.target_fan_speed_percent is defined and server.target_fan_speed_percent is not none else 'Unknown' }}{% if server.target_fan_speed_percent is number %}%{% endif %}</div>{% if server.target_fan_speed_percent is number %}<span class="metric-note">Target fan speed</span>{% endif %}</div>
     </div>
-
-    <style>
-        .main-container { max-width: 1200px; margin: 20px auto; }
-        .server-card { margin-bottom: 2em; }
-        .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1em; margin-bottom: 1em; }
-        .temp-list { display: flex; flex-wrap: wrap; gap: 8px; }
-        .temp-badge { background-color: var(--secondary-background-color); padding: 5px 10px; border-radius: 12px; font-size: 0.9em; }
-        .fan-list { column-count: 2; }
-        .readings-scroll { overflow-x: auto; }
-        .readings-table { width: 100%; border-collapse: collapse; }
-        .readings-table th, .readings-table td { text-align: left; padding: 8px; border-bottom: 1px solid var(--divider-color, #484848); }
-        h2 small { font-size: 0.7em; color: var(--secondary-text-color); }
-    </style>
-</body>
-</html>
+    <div class="server-details-grid">
+        <section class="reading-section"><h3>Temperatures</h3><div class="reading-chips">{% for temp in server.cpu_temps_c %}<span class="reading-chip">CPU{{ server.cpu_ids[loop.index0] if server.cpu_ids is defined else loop.index }}: {{ temp }}°C</span>{% else %}<span class="empty-inline">CPU readings unavailable</span>{% endfor %}</div><p class="secondary-reading">Exhaust <strong>{% if server.exhaust_temp_c is not none %}{{ '%.1f'|format(server.exhaust_temp_c) }} °C{% else %}Unknown{% endif %}</strong></p></section>
+        <section class="reading-section"><h3>Fan speeds</h3><dl class="reading-list">{% for fan in server.actual_fan_rpms %}<div><dt>{{ fan.name }}</dt><dd>{{ fan.rpm }} <span class="muted">RPM</span></dd></div>{% else %}<div><dt class="empty-inline">Fan readings unavailable</dt></div>{% endfor %}</dl></section>
+    </div>
+    <section class="reading-section health-section"><h3>Hardware health</h3><dl class="reading-list health-list">
+        {% if server.sensor_threshold_status is defined %}<div><dt>Hardware threshold status</dt><dd>{{ value_badge(server.sensor_threshold_status) }}</dd></div>{% endif %}
+        {% for battery in server.batteries|default([]) %}<div><dt>{{ battery.name }}</dt><dd>{{ value_badge(battery.health) }}{% if server.include_advanced_diagnostics and battery.voltage is not none %}<span class="muted">{{ battery.voltage }} V</span>{% endif %}</dd></div>{% endfor %}
+        {% for psu in server.psu_statuses|default([]) %}<div><dt>{{ psu.name }}</dt><dd>{{ value_badge('Unknown' if psu.ok is none else 'OK' if psu.ok else 'Problem') }}</dd></div>{% endfor %}
+        {% if server.intrusion_seen %}<div><dt>System Board Intrusion</dt><dd>{{ value_badge('Unknown' if server.intrusion_active is none else 'Detected' if server.intrusion_active else 'Clear') }}</dd></div>{% endif %}
+    </dl>{% if server.sensor_threshold_alerts %}<ul class="threshold-alerts">{% for alert in server.sensor_threshold_alerts %}<li>{{ alert.name }}: {{ alert.status }}{% if alert.value is defined %} · {{ alert.value }} {{ alert.unit or '' }}{% endif %}</li>{% endfor %}</ul>{% endif %}</section>
+    {% if server.include_advanced_diagnostics %}<dl class="reading-list power-details">
+        {% if server.power_capacity_watts is defined and server.power_capacity_watts is not none %}<div><dt>Capacity Reference</dt><dd>{{ server.power_capacity_watts }} W</dd></div>{% endif %}
+        {% if server.power_warning_watts is defined and server.power_warning_watts is not none %}<div><dt>Warning Threshold</dt><dd>{{ server.power_warning_watts }} W</dd></div>{% endif %}
+        {% if server.power_failure_watts is defined and server.power_failure_watts is not none %}<div><dt>Failure Threshold</dt><dd>{{ server.power_failure_watts }} W</dd></div>{% endif %}
+    </dl>{% endif %}
+    {% set available_readings = server.sensor_readings|default([])|rejectattr('value', 'none')|list %}
+    {% if available_readings %}<details class="sensor-disclosure" {% if not server.include_advanced_diagnostics %}open{% endif %}>
+        <summary>{{ 'Additional Sensor Readings' if server.include_advanced_diagnostics else 'Hardware Health Readings' }} <span class="count">{{ available_readings|length }}</span></summary>
+        <div class="table-scroll" role="region" aria-label="{{ server.alias }} sensor readings" tabindex="0"><table class="readings-table"><thead><tr><th scope="col">Sensor</th><th scope="col">Reading</th><th scope="col">IPMI status</th></tr></thead><tbody>
+        {% for reading in available_readings %}<tr><td>{{ reading.name }}</td><td>{{ reading.value }}{% if reading.unit %} {{ reading.unit }}{% endif %}</td><td><span class="badge badge-neutral">{{ reading.status }}</span></td></tr>{% endfor %}
+        </tbody></table></div>
+    </details>{% endif %}
+    <footer class="server-footer">Last updated <time>{{ server.last_updated }}</time></footer>
+</article>{% endfor %}</div>
+{% else %}<section class="panel empty-state"><span class="empty-symbol" aria-hidden="true">＋</span><h2>No readings yet</h2><p>Add a server to start monitoring. If one is already configured, check the app logs.</p><a class="button" href="servers">Manage Servers</a></section>{% endif %}
+{% endblock %}
