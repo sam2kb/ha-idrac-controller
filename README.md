@@ -6,9 +6,17 @@ Monitor Dell PowerEdge servers with iDRAC 7 or 8 in Home Assistant over IPMI.
 Each server becomes an MQTT device with temperatures, fan speeds, power and
 hardware health. Optional controls manage cooling and server power.
 
-[Install](#install) · [Setup](#setup) · [Sensors](#sensors) ·
+[Screenshots](#screenshots) · [Install](#install) · [Setup](#setup) · [Sensors](#sensors) ·
 [Controls](#controls) · [Troubleshooting](ha-idrac-controller/README.md#troubleshooting) ·
 [Reference](docs/reference.md) · [Changelog](ha-idrac-controller/CHANGELOG.md)
+
+## Screenshots
+
+| Dashboard | Server settings | Home Assistant |
+| --- | --- | --- |
+| [<img src="assets/screenshots/dashboard.png" alt="Overview with temperatures, power and hardware health" width="250">](assets/screenshots/dashboard.png) | [<img src="assets/screenshots/server-settings.png" alt="Server settings for cooling, diagnostics and optional power controls" width="250">](assets/screenshots/server-settings.png) | [<img src="assets/screenshots/home-assistant.png" alt="Home Assistant MQTT sensors, diagnostics and enabled power controls" width="250">](assets/screenshots/home-assistant.png) |
+
+Select a screenshot to view it full size.
 
 ## Install
 

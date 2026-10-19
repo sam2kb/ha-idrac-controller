@@ -3,10 +3,18 @@
 Monitor iDRAC 7/8 PowerEdge servers in Home Assistant, with optional cooling and
 power controls. Each server has an MQTT device and a dashboard in the app.
 
-[Install](#install) · [Configure](#configure) · [Sensors](#sensors) ·
+[Screenshots](#screenshots) · [Install](#install) · [Configure](#configure) · [Sensors](#sensors) ·
 [Cooling](#cooling) · [Power actions](#power-actions) ·
 [Troubleshooting](#troubleshooting) ·
 [Technical reference](https://github.com/sam2kb/ha-idrac-controller/blob/main/docs/reference.md)
+
+## Screenshots
+
+| Dashboard | Server settings | Home Assistant |
+| --- | --- | --- |
+| [<img src="https://raw.githubusercontent.com/sam2kb/ha-idrac-controller/main/assets/screenshots/dashboard.png" alt="Overview with temperatures, power and hardware health" width="250">](https://raw.githubusercontent.com/sam2kb/ha-idrac-controller/main/assets/screenshots/dashboard.png) | [<img src="https://raw.githubusercontent.com/sam2kb/ha-idrac-controller/main/assets/screenshots/server-settings.png" alt="Server settings for cooling, diagnostics and optional power controls" width="250">](https://raw.githubusercontent.com/sam2kb/ha-idrac-controller/main/assets/screenshots/server-settings.png) | [<img src="https://raw.githubusercontent.com/sam2kb/ha-idrac-controller/main/assets/screenshots/home-assistant.png" alt="Home Assistant MQTT sensors, diagnostics and enabled power controls" width="250">](https://raw.githubusercontent.com/sam2kb/ha-idrac-controller/main/assets/screenshots/home-assistant.png) |
+
+Select a screenshot to view it full size.
 
 ## Install
 
