@@ -1,0 +1,4 @@
+# HA iDRAC Controller/repository.yaml
+name: "HA iDRAC Controller"
+url: "https://github.com/sam2kb/ha-idrac-controller"
+maintainer: "sam2kb"
