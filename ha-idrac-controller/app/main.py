@@ -9,6 +9,7 @@ import time
 from .fan_logic import SimpleFanState, clamp_speed, validate_fan_config, validate_fan_curve
 from .ipmi_manager import IPMIManager
 from .mqtt_client import MqttClient
+from .mqtt_config import resolve_mqtt_config
 from .pid_controller import PIDController
 from . import web_server
 
@@ -54,6 +55,7 @@ class ServerWorker:
         self.server_info = {}
         self.discovered_sensors = set()
         self._next_mqtt_attempt = 0.0
+        self._mqtt_configured = False
         self._pcie_response_disabled = False
         self.alive = True
         self.fan_cfg = validate_fan_config(
@@ -117,11 +119,6 @@ class ServerWorker:
                 self._log("warning", "This server did not accept the third-party PCIe cooling-response "
                                      "command; leaving that setting unchanged.")
 
-        self.mqtt.configure_broker(
-            self.global_opts["mqtt_host"], self.global_opts["mqtt_port"],
-            self.global_opts["mqtt_username"], self.global_opts["mqtt_password"],
-            self.log_level,
-        )
         self.mqtt.set_device_info(
             server_alias=self.alias,
             manufacturer=self.server_info.get("manufacturer"),
@@ -135,13 +132,27 @@ class ServerWorker:
 
         # MQTT being down must not stop IPMI monitoring/control. Try once at
         # startup, then keep retrying in the background of the control loop.
-        if self.global_opts.get("mqtt_host"):
-            self.mqtt.connect()
-            if not self.mqtt.wait_connected(timeout=3):
-                self._log("warning", "MQTT broker not reachable yet; will keep retrying in the background.")
-        else:
-            self._log("warning", "No MQTT broker configured; Home Assistant entities will not be published.")
+        if self._try_mqtt_connect() and not self.mqtt.wait_connected(timeout=3):
+            self._log("warning", "MQTT broker not reachable yet; will keep retrying in the background.")
 
+        return True
+
+    def _try_mqtt_connect(self):
+        self._next_mqtt_attempt = time.time() + 15
+        if not self._mqtt_configured:
+            settings = resolve_mqtt_config(self.global_opts, self._log)
+            if settings is None:
+                return False
+            try:
+                self.mqtt.configure_broker(
+                    settings["host"], settings["port"], settings["username"],
+                    settings["password"], self.log_level, use_tls=settings["ssl"],
+                )
+            except (OSError, ValueError):
+                self._log("warning", "Could not configure MQTT; monitoring continues and setup will retry.")
+                return False
+            self._mqtt_configured = True
+        self.mqtt.connect()
         return True
 
     def run(self):
@@ -158,10 +169,8 @@ class ServerWorker:
         while self.running and running:
             start_time = time.time()
 
-            if (not self.mqtt.is_connected and self.global_opts.get("mqtt_host")
-                    and time.time() >= self._next_mqtt_attempt):
-                self.mqtt.connect()
-                self._next_mqtt_attempt = time.time() + 15
+            if not self.mqtt.is_connected and time.time() >= self._next_mqtt_attempt:
+                self._try_mqtt_connect()
 
             raw_temp_data = self.ipmi.retrieve_temperatures_raw()
             if raw_temp_data is None:
@@ -386,7 +395,7 @@ if __name__ == "__main__":
     global_options = {
         "log_level": os.getenv("LOG_LEVEL", "info"),
         "check_interval_seconds": int(os.getenv("CHECK_INTERVAL_SECONDS", 60)),
-        "mqtt_host": os.getenv("MQTT_HOST", "core-mosquitto"),
+        "mqtt_host": os.getenv("MQTT_HOST", ""),
         "mqtt_port": int(os.getenv("MQTT_PORT", 1883)),
         "mqtt_username": os.getenv("MQTT_USERNAME", ""),
         "mqtt_password": os.getenv("MQTT_PASSWORD", ""),

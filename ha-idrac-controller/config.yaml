@@ -1,7 +1,7 @@
 # HA iDRAC Controller/config.yaml
 
 name: "HA iDRAC Controller"
-version: "1.0.4"
+version: "1.0.5"
 slug: "ha_idrac_controller"
 description: "Monitor and control Dell PowerEdge servers through iDRAC over IPMI."
 url: "https://github.com/sam2kb/ha-idrac-controller"
@@ -32,8 +32,8 @@ options:
   check_interval_seconds: 30
   log_level: "info"
 
-  # MQTT Configuration (Global for now)
-  mqtt_host: "core-mosquitto"
+  # MQTT: leave host and credentials empty for automatic Supervisor setup
+  mqtt_host: ""
   mqtt_port: 1883
   mqtt_username: ""
   mqtt_password: ""
@@ -50,7 +50,7 @@ schema:
   log_level: "list(trace|debug|info|notice|warning|error|fatal)"
 
   # MQTT Configuration
-  mqtt_host: "str"
+  mqtt_host: "str?"
   mqtt_port: "port"
   mqtt_username: "str?"
   mqtt_password: "password?"

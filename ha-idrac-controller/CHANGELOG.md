@@ -1,3 +1,12 @@
+## 1.0.5 - 2026-10-19
+
+- Read the MQTT broker address, port and service credentials automatically from
+  Home Assistant Supervisor when manual MQTT settings are empty.
+- Keep explicit manual broker settings and credentials as overrides. Older
+  credential-free core-mosquitto defaults also use automatic configuration.
+- Retry unavailable service discovery while IPMI monitoring continues. Use TLS
+  when the Supervisor service requires it; keep discovered credentials in memory.
+
 ## 1.0.4 - 2026-10-19
 
 - Attempt Dell automatic fan control when temperature polling fails. Clear

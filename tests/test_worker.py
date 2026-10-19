@@ -15,6 +15,7 @@ CPU_HOT = "CPU1 Temp | 01h | ok | 3.1 | 65 degrees C"
 
 @pytest.fixture
 def make_worker(monkeypatch, tmp_path):
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
     monkeypatch.setattr(main, "running", True)
     monkeypatch.setattr(main, "PID_STATE_FILE", str(tmp_path / "pid.json"))
     monkeypatch.setattr(main, "ALL_SERVERS_STATUS", {})
@@ -159,3 +160,52 @@ def test_shutdown_handler_is_ready_before_connect_and_dispatches_only_press(make
     item.ipmi.chassis_shutdown.assert_not_called()
     item.mqtt._on_message(None, None, SimpleNamespace(topic=topic, payload=b"PRESS"))
     item.ipmi.chassis_shutdown.assert_called_once_with()
+
+
+def test_late_mqtt_service_discovery_does_not_stop_ipmi(make_worker, monkeypatch):
+    item = make_worker()
+    settings = {"host": "core-mosquitto", "port": 1883,
+                "username": "fixture-service", "password": "fixture-password", "ssl": False}
+    resolver = Mock(side_effect=[None, settings])
+    monkeypatch.setattr(main, "resolve_mqtt_config", resolver)
+    cycles = []
+
+    def sleep(_):
+        cycles.append(True)
+        item._next_mqtt_attempt = 0
+        if len(cycles) == 2:
+            item.stop()
+    item._sleep = sleep
+    item._run_loop()
+    assert item.ipmi.retrieve_temperatures_raw.call_count == 2
+    assert item.ipmi.apply_user_fan_control_profile.call_count == 2
+    item.mqtt.connect.assert_called_once()
+    assert item.mqtt.username == "fixture-service"
+    assert item.global_opts["mqtt_password"] == ""
+
+
+def test_successful_settings_are_cached_and_tls_is_only_configured_once(make_worker, monkeypatch):
+    item = make_worker()
+    settings = {"host": "core-mosquitto", "port": 8883,
+                "username": "fixture-service", "password": "fixture-password", "ssl": True}
+    resolver = Mock(return_value=settings)
+    monkeypatch.setattr(main, "resolve_mqtt_config", resolver)
+    item.mqtt.client.tls_set = Mock()
+    item._try_mqtt_connect()
+    item._try_mqtt_connect()
+    resolver.assert_called_once()
+    item.mqtt.client.tls_set.assert_called_once()
+    assert item.mqtt.connect.call_count == 2
+
+
+def test_tls_configuration_failure_does_not_stop_ipmi(make_worker, monkeypatch):
+    item = make_worker()
+    monkeypatch.setattr(main, "resolve_mqtt_config", Mock(return_value={
+        "host": "core-mosquitto", "port": 8883,
+        "username": "", "password": "", "ssl": True,
+    }))
+    item.mqtt.client.tls_set = Mock(side_effect=OSError("fixture-private-detail"))
+    run_cycles(item)
+    item.ipmi.retrieve_temperatures_raw.assert_called_once()
+    item.mqtt.connect.assert_not_called()
+    assert "fixture-private-detail" not in str(item._log.call_args_list)

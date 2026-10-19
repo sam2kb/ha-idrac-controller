@@ -33,7 +33,7 @@ class MqttClient:
         if levels.get(self.log_level, levels["info"]) <= levels.get(level.lower(), levels["info"]):
             print(f"[{level.upper()}] MQTT ({self.client_id}): {message}", flush=True)
 
-    def configure_broker(self, host, port, username, password, log_level="info"):
+    def configure_broker(self, host, port, username, password, log_level="info", use_tls=False):
         self.broker_address = host
         self.port = int(port)
         self.username = username
@@ -41,6 +41,8 @@ class MqttClient:
         self.log_level = log_level.lower()
         if self.username:
             self.client.username_pw_set(self.username, self.password)
+        if use_tls:
+            self.client.tls_set()
 
     def set_device_info(self, server_alias, manufacturer, model, ip_address,
                         serial_number=None, sw_version=None):

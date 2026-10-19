@@ -69,14 +69,33 @@ temperatures outside -20 to 125 °C are ignored.
 
 Most settings live in the app's web UI.
 
-1.  On the app page, open the Configuration tab and fill in the MQTT broker
-    details. The fan speed and temperature values there are global defaults for
-    new servers. Save the settings.
+1.  Leave the MQTT host, username and password empty to use Home Assistant's
+    registered broker automatically. For an external broker, enter its host,
+    port and credentials in the Configuration tab. The fan speed and temperature
+    values there are global defaults for new servers. Save the settings.
 2.  Start the app, then click Open Web UI.
 3.  Open Manage Servers and use the Add New Server form. It is pre-filled with
     the global defaults.
 4.  Restart the app after adding or editing servers. The web UI links to the app
     dashboard for this.
+
+### Automatic MQTT setup
+
+The app reads the registered broker's address, port and service credentials from
+Home Assistant Supervisor. With the Mosquitto app, this is normally
+core-mosquitto. The credentials stay in memory and are not copied to your app
+options or logs. The service must use MQTT 3.1.1; TLS is enabled when the service
+requires it.
+
+An older core-mosquitto default with no credentials also uses automatic setup.
+A manually entered host with credentials, or an external host, takes precedence.
+To switch an existing manual setup to automatic, clear the host, username and
+password, save, and restart the app.
+
+If the service is unavailable, the app retries while IPMI monitoring continues.
+Supervisor requests use a three-second connection timeout. External brokers
+configured only in Home Assistant's MQTT integration still need manual
+connection settings here.
 
 ## Web UI
 
@@ -103,7 +122,9 @@ Assistant if you need different IDs.
   Configuration tab for more detail.
 - For IPMI errors, confirm that IPMI over LAN is enabled and that the
   credentials in the web UI are correct.
-- For MQTT errors, check the broker settings in the Configuration tab.
+- For MQTT errors in automatic mode, check that the Mosquitto app is running
+  and provides the MQTT service. For a manual broker, check the connection
+  settings in the Configuration tab.
 - If sensor values are missing or wrong, the log shows the raw SDR data at
   debug level. Open an issue with the `ipmitool sdr type temperature` lines for
   your model.

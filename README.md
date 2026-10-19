@@ -56,8 +56,9 @@ servers and a Manage Servers page for adding, editing and deleting them.
 
 ## Configure
 
-1. On the app page, open the Configuration tab and fill in the MQTT broker
-   details. The fan values there are defaults for new servers. Save.
+1. Leave the MQTT host, username and password empty to use Home Assistant's
+   registered broker automatically. For an external broker, enter its host,
+   port and credentials in the Configuration tab. Save the settings.
 2. Start the app, then click Open Web UI.
 3. Open Manage Servers and add each server: alias, iDRAC address, username,
    password, fan mode and thresholds.
