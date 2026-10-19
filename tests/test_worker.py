@@ -923,15 +923,18 @@ def test_retained_owned_fan_is_cleared_on_cold_start_before_a_live_read(make_wor
     item.mqtt.publish.assert_not_called()
 
 
-def test_unreadable_spare_battery_does_not_become_an_entity_and_old_phantom_is_removed(make_worker):
+@pytest.mark.parametrize("spare_state", ["Disabled", "No Reading"])
+def test_unreadable_spare_battery_does_not_become_an_entity_and_old_phantom_is_removed(make_worker, spare_state):
     import json
     item = make_worker(fan_control_enabled=False)
     item._initialize()
     del item._publish_mqtt_data
     item.mqtt.is_connected = True
-    rows = "ROMB Battery | 68h | ok | 11.1 |\nROMB Battery | 69h | ns | 11.2 | Disabled"
+    rows = f"ROMB Battery | 68h | ok | 11.1 |\nROMB Battery | 69h | ns | 11.2 | {spare_state}"
     item._update_status({"cpu_temps": []}, [], 10, [], "Server off", item.ipmi.parse_battery_status(rows))
-    item.mqtt.publish.reset_mock()
+    # Upgrade cleanup also runs while the spare still reports Disabled.
+    phantom_config = "homeassistant/sensor/idrac_controller_fixture_battery_romb_battery_11_2_69h_health/config"
+    assert any(call.args[:2] == (phantom_config, "") for call in item.mqtt.publish.call_args_list)
     rows = rows.replace("68h | ok", "68h | ns").replace("Disabled", "No Reading")
     item._update_status({"cpu_temps": []}, [], 10, [], "Server off", item.ipmi.parse_battery_status(rows))
     payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}

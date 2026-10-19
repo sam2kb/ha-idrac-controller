@@ -460,7 +460,17 @@ class ServerWorker:
             readings = [reading for reading in readings if reading["diagnostic_tier"] == "important"]
         return readings
 
+    def _discard_unconfirmed_battery(self, name):
+        if self.mqtt.is_connected and name not in self._ignored_batteries:
+            slug = "battery_" + re.sub(r"[^a-zA-Z0-9_]+", "_", name).strip("_").lower()
+            self.mqtt.remove_discovery("sensor", slug + "_health")
+            self.mqtt.remove_discovery("sensor", slug + "_voltage")
+            self._ignored_batteries.add(name)
+
     def _update_status(self, temps, fans, power, psu_statuses, target_fan_speed, batteries=None, intrusion=None, readings=None):
+        for name in self.ipmi.disabled_battery_slots:
+            if name not in self._known_batteries:
+                self._discard_unconfirmed_battery(name)
         # Keep an already discovered battery visible as unknown if a later
         # read fails or no longer contains it, rather than leaving stale health.
         self._known_batteries = {name: {"name": name, "health": "Unknown", "voltage": None}
@@ -473,11 +483,7 @@ class ServerWorker:
             if unconfirmed_slot:
                 # An unreadable duplicate is not evidence of another installed
                 # battery. Also remove a phantom discovered by older versions.
-                if self.mqtt.is_connected and name not in self._ignored_batteries:
-                    slug = "battery_" + re.sub(r"[^a-zA-Z0-9_]+", "_", name).strip("_").lower()
-                    self.mqtt.remove_discovery("sensor", slug + "_health")
-                    self.mqtt.remove_discovery("sensor", slug + "_voltage")
-                    self._ignored_batteries.add(name)
+                self._discard_unconfirmed_battery(name)
                 continue
             self._known_batteries[name] = battery
         batteries = list(self._known_batteries.values())

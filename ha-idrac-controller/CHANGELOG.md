@@ -1,4 +1,4 @@
-## 1.1.2 - 2026-10-19
+## 1.1.3 - 2026-10-19
 
 - Clear missing fan RPM in Home Assistant, including retained fan entities when
   the app starts while the server is off.

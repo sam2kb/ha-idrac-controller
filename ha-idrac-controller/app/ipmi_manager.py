@@ -41,6 +41,7 @@ class IPMIManager:
         self.last_stderr = ""
         self._sensor_types = {}
         self._battery_primary = {}
+        self.disabled_battery_slots = set()
         # Set when the iDRAC answers "I do not have that command" or "not for
         # this account". Only ever set while no fan command has succeeded, so
         # a later failure can never leave the fans pinned at a user speed.
@@ -424,6 +425,7 @@ class IPMIManager:
         health states, not charge percentages. Unavailable readings stay unknown.
         """
         batteries = []
+        self.disabled_battery_slots = set()
         candidates = {}
         for line in (sdr_data or "").splitlines():
             fields = [part.strip() for part in line.split("|")]
@@ -445,10 +447,12 @@ class IPMIManager:
         for identity in sorted(candidates, key=identity_order):
             name, sensor, status, entity, reading = candidates[identity]
             primary = self._battery_primary.setdefault(name, identity)
-            if status.lower() in ("ns", "na", "u") and reading.lower() == "disabled":
-                continue
             if identity != primary:
                 name = f"{name} ({entity}, {identity[1]})"
+            if status.lower() in ("ns", "na", "u") and reading.lower() == "disabled":
+                if identity != primary:
+                    self.disabled_battery_slots.add(name)
+                continue
             reading_lower = reading.lower()
             health = "Unknown"
             voltage = None
