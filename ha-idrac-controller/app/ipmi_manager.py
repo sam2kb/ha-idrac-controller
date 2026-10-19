@@ -18,30 +18,14 @@ MAX_FAN_PERCENT = 100
 
 # "CPU1 Temp        | 01h | ok  |  3.1 | 45 degrees C"
 _TEMP_LINE_RE = re.compile(
-    r"^(?P<name>.+?)\s*\|\s*[0-9a-fA-F]+h\s*\|\s*(?P<status>ok|ns|nr|cr|u)\s*\|"
+    r"^(?P<name>.+?)\s*\|\s*[0-9a-fA-F]+h\s*\|\s*(?P<status>[a-z]+)\s*\|"
     r"\s*(?P<entity>\d+\.\d+)\s*\|\s*(?P<value>[-+]?\d*\.?\d+)\s*degrees C",
     re.IGNORECASE,
 )
 # "Fan1A Tach       | 30h | ok  |  7.1 | 2040 RPM"
 _FAN_LINE_RE = re.compile(
-    r"^(?P<name>.+?)\s*\|\s*[0-9a-fA-F]+h\s*\|\s*(?P<status>ok|ns|nr|cr|u)\s*\|"
+    r"^(?P<name>.+?)\s*\|\s*[0-9a-fA-F]+h\s*\|\s*(?P<status>[a-z]+)\s*\|"
     r"\s*(?P<entity>\d+\.\d+)\s*\|\s*(?P<value>[\d.]+)\s*RPM",
-    re.IGNORECASE,
-)
-# "Pwr Consumption  | 77h | ok | 10.1 | 196 Watts" / "System Level | 126.000 | Watts"
-_POWER_RE = re.compile(
-    r"^(?:Pwr Consumption|System Level)\b.*?\|\s*(?P<value>[\d.]+)\s*Watts",
-    re.IGNORECASE,
-)
-# "PS1 Status       | 0Ah | ok | 10.1 | Presence detected"
-_PSU_STATUS_RE = re.compile(
-    r"^PS(?P<index>\d)\s+Status\s*\|\s*[0-9a-fA-F]+h\s*\|\s*(?P<status>ok|ns|nr|cr|u)\s*\|"
-    r"[^|]*\|\s*(?P<reading>.*)$",
-    re.IGNORECASE,
-)
-# "PS1 PG Fail      | 0Ch | ok | 10.1 |"
-_PSU_FAIL_RE = re.compile(
-    r"^PS(?P<index>\d)\s+PG Fail\s*\|\s*[0-9a-fA-F]+h\s*\|\s*(?P<status>ok|ns|nr|cr|u)",
     re.IGNORECASE,
 )
 _CPU_NAME_RE = re.compile(r"(?:^|\b)CPU\s?\d", re.IGNORECASE)
@@ -55,6 +39,7 @@ class IPMIManager:
         self.log_level = log_level.lower()
         self.base_args = self._build_base_args(conn_type)
         self.last_stderr = ""
+        self._sensor_types = {}
         # Set when the iDRAC answers "I do not have that command" or "not for
         # this account". Only ever set while no fan command has succeeded, so
         # a later failure can never leave the fans pinned at a user speed.
@@ -288,6 +273,8 @@ class IPMIManager:
             match = _TEMP_LINE_RE.match(line.strip())
             if not match:
                 continue
+            if match.group("status").lower() in ("ns", "na", "u"):
+                continue
             try:
                 temp_value = int(round(float(match.group("value"))))
             except ValueError:
@@ -299,7 +286,7 @@ class IPMIManager:
             sensor_name = match.group("name").strip()
             entity = match.group("entity")
 
-            if inlet_pattern_str and re.search(inlet_pattern_str, sensor_name, re.IGNORECASE):
+            if entity.split(".")[0] in ("55", "64") or (inlet_pattern_str and re.search(inlet_pattern_str, sensor_name, re.IGNORECASE)):
                 if temps["inlet_temp"] is None:
                     temps["inlet_temp"] = temp_value
                 continue
@@ -308,13 +295,13 @@ class IPMIManager:
                     temps["exhaust_temp"] = temp_value
                 continue
 
-            is_cpu = entity.startswith("3.") or bool(_CPU_NAME_RE.search(sensor_name))
+            is_cpu = entity.split(".")[0] in ("3", "65") or bool(_CPU_NAME_RE.search(sensor_name))
             if cpu_pattern_str:
                 is_cpu = is_cpu or bool(re.search(cpu_pattern_str, sensor_name, re.IGNORECASE))
             if is_cpu:
                 cpu_name = re.search(r"\bCPU\s*(\d+)\b", sensor_name, re.IGNORECASE)
                 cpu_number = (int(cpu_name.group(1)) if cpu_name else
-                              int(entity.split(".")[1]) if entity.startswith("3.") else
+                              int(entity.split(".")[1]) if entity.split(".")[0] in ("3", "65") else
                               len(temps["cpu_temps"]) + 1)
                 temps["cpu_ids"].append(max(1, cpu_number))
                 temps["cpu_temps"].append(temp_value)
@@ -332,7 +319,7 @@ class IPMIManager:
 
         for line in sdr_data.splitlines():
             match = _FAN_LINE_RE.match(line.strip())
-            if not match:
+            if not match or match.group("status").lower() in ("ns", "na", "u"):
                 continue
             try:
                 fans.append({"name": match.group("name").strip(),
@@ -349,54 +336,79 @@ class IPMIManager:
         if not sdr_data:
             return None
 
+        sensor_name = self.get_power_sensor_name(sdr_data)
         for line in sdr_data.splitlines():
-            match = _POWER_RE.search(line.strip())
-            if match:
-                try:
-                    return int(float(match.group("value")))
-                except (ValueError, IndexError):
-                    continue
+            fields = [part.strip() for part in line.split("|")]
+            if len(fields) == 5 and fields[0] == sensor_name:
+                return int(float(fields[4].split()[0]))
         return None
 
-    def get_power_status(self, sdr_data):
-        """Return [{"name": "PSU1", "ok": bool}] based on presence and PG fail.
+    def refresh_sensor_type(self, sensor_type):
+        """Discover identities by standard IPMI type, independent of Dell labels.
 
-        The voltage heuristic used previously is gone: 13G iDRACs expose
-        "PS1 Status"/"PS1 PG Fail" but not a sensor named "Voltage 1", which
-        made healthy supplies look failed.
+        Only identities are cached. Every health value still comes from the
+        current SDR poll, so a failed poll cannot reuse old healthy readings.
         """
-        if not sdr_data:
-            self._log("warning", "SDR data is empty for power status parsing.")
-            return []
+        if sensor_type not in ("Battery", "Power Supply", "Physical Security"):
+            return
+        raw = self._run_ipmi_command(["sdr", "type", sensor_type], is_raw_command=False, timeout=5)
+        if raw is not None:
+            self._sensor_types[sensor_type] = {
+                (fields[0], fields[1].lower(), fields[3])
+                for line in raw.splitlines()
+                if len(fields := [part.strip() for part in line.split("|")]) == 5
+            }
 
+    def _has_sensor_type(self, fields, sensor_type):
+        return (fields[0], fields[1].lower(), fields[3]) in self._sensor_types.get(sensor_type, set())
+
+    def get_power_status(self, sdr_data):
+        """Decode PSU presence and asserted faults; unreadable stays unknown."""
         psus = {}
-        for line in sdr_data.splitlines():
-            line = line.strip()
-            match = _PSU_STATUS_RE.match(line)
-            if match:
-                index = match.group("index")
-                reading = match.group("reading").lower()
-                psus.setdefault(index, {})["present"] = "presence detected" in reading
+        for line in (sdr_data or "").splitlines():
+            fields = [part.strip() for part in line.split("|")]
+            if len(fields) != 5:
                 continue
-
-            match = _PSU_FAIL_RE.match(line)
-            if match:
-                index = match.group("index")
-                status = match.group("status").lower()
-                psus.setdefault(index, {})["fault"] = status not in ("ok", "nr", "ns")
+            name, _, status, entity, reading = fields
+            named = re.fullmatch(r"PS(?:U)?(\d+)\s+(Status|PG Fail)", name, re.IGNORECASE)
+            entity_match = re.fullmatch(r"10\.(\d+)", entity)
+            typed = self._has_sensor_type(fields, "Power Supply")
+            if not named and not (entity_match and (typed or name.lower() in ("status", "pg fail"))):
                 continue
-
-        final_status = []
+            # A typed Power Supply can also expose voltage/current sensors.
+            if re.search(r"\b(?:Volts?|Amps?|Watts?)\b", reading, re.IGNORECASE):
+                continue
+            index = int(entity_match.group(1)) if entity_match else 0
+            if index == 0:
+                if not named:
+                    continue
+                index = int(named.group(1))
+            data = psus.setdefault(index, {"present": False, "fault": False, "unknown": False})
+            status = status.lower()
+            if status in ("ns", "na", "u") or reading.lower() in ("no reading", "disabled", "not readable"):
+                data["unknown"] = True
+                continue
+            text = re.sub(r"[-_]", " ", reading.lower())
+            pg_fail = (named and named.group(2).lower() == "pg fail") or name.lower() == "pg fail"
+            critical = status in ("cr", "nr", "lcr", "ucr", "lnr", "unr", "nc", "lnc", "unc")
+            fault = bool(re.search(r"\b(?:failure|failed|predictive failure|ac lost|input lost|out of range|configuration error)\b", text))
+            fault = fault or critical or bool(pg_fail and text in ("state asserted", "asserted"))
+            data["fault"] |= fault
+            data["present"] |= "presence detected" in text or text == "present"
+            if not fault and "presence detected" not in text and text != "present" and text not in ("", "0x00", "0x0000", "state deasserted", "deasserted"):
+                data["unknown"] = True
+        results = []
         for index, data in sorted(psus.items()):
-            if not data.get("present", False):
-                # Empty PSU bay: no entity, instead of a permanent problem sensor.
-                continue
-            name = f"PSU{index}"
-            is_ok = not data.get("fault", False)
-            final_status.append({"name": name, "ok": is_ok})
-            self._log("debug", f"PSU Status for {name}: Fault={data.get('fault', False)} -> Final OK={is_ok}")
-
-        return final_status
+            if data["fault"]:
+                ok = False  # An asserted input fault is meaningful without presence text.
+            elif data["unknown"]:
+                ok = None
+            elif data["present"]:
+                ok = True
+            else:
+                continue  # An empty, readable PSU bay is not a failed supply.
+            results.append({"name": f"PSU{index}", "ok": ok})
+        return results
 
     def parse_battery_status(self, sdr_data):
         """Read battery health/voltage from the existing SDR list, when exposed.
@@ -407,7 +419,9 @@ class IPMIManager:
         batteries = []
         for line in (sdr_data or "").splitlines():
             fields = [part.strip() for part in line.split("|")]
-            if len(fields) != 5 or not re.search(r"\b(?:battery|batt|vbatt|cmos)\b", fields[0], re.IGNORECASE):
+            if len(fields) != 5:
+                continue
+            if fields[3].split(".")[0] != "40" and not self._has_sensor_type(fields, "Battery") and not re.search(r"\b(?:battery|batt|vbatt|cmos)\b", fields[0], re.IGNORECASE):
                 continue
             name, _, status, _, reading = fields
             reading_lower = reading.lower()
@@ -423,8 +437,14 @@ class IPMIManager:
                     health = "Low"
                 elif re.search(r"\b(?:absent|missing|not present)\b", reading_lower):
                     health = "Missing"
-                elif status.lower() == "ok" and ("presence detected" in reading_lower or reading_lower == "ok" or voltage_match):
+                elif status.lower() == "ok" and ("presence detected" in reading_lower or reading_lower in ("ok", "present") or voltage_match):
                     health = "Healthy"
+                elif status.lower() == "ok" and reading_lower in ("", "0x00", "0x0000", "state deasserted", "deasserted"):
+                    # Compact discrete sensors print nothing when no event is
+                    # asserted. This does not prove a battery is installed.
+                    health = "No fault reported"
+                elif status.lower() == "ok" and reading_lower in ("state asserted", "asserted"):
+                    health = "Warning"
                 if voltage_match:
                     try:
                         voltage = float(voltage_match.group(1))
@@ -433,22 +453,63 @@ class IPMIManager:
             batteries.append({"name": name, "health": health, "voltage": voltage})
         return batteries
 
-    def retrieve_power_details_raw(self):
-        """Read Dell power/headroom/thresholds; this never changes a power cap."""
-        return self._run_ipmi_command(
-            ["delloem", "powermonitor", "powerconsumption", "watt"],
-            is_raw_command=False, timeout=5,
-        )
+    def get_power_sensor_name(self, sdr_data):
+        """Choose an unambiguous system watt sensor, never a PSU input sensor."""
+        named, names = [], []
+        for line in (sdr_data or "").splitlines():
+            fields = [part.strip() for part in line.split("|")]
+            if len(fields) != 5:
+                continue
+            names.append(fields[0])
+            if fields[2].lower() in ("ns", "na", "u"):
+                continue
+            if not re.fullmatch(r"\d+(?:\.\d+)?\s+Watts", fields[4], re.IGNORECASE):
+                continue
+            if fields[0].lower() in ("pwr consumption", "system level"):
+                named.append(fields[0])
+        # An arbitrary board-level watt sensor could measure one component.
+        # The independent Dell power query supplies total watts on other labels.
+        return named[0] if len(named) == 1 and names.count(named[0]) == 1 else None
+
+    def retrieve_power_details_raw(self, sensor_name):
+        """Read thresholds and headroom independently, preserving partial data.
+
+        Dell's powermonitor powerconsumption CLI hardcodes System Level and
+        aborts on machines exposing Pwr Consumption. These queries use the
+        discovered sensor and the same read-only Dell headroom command (0xBB).
+        """
+        if sensor_name is not None and (not isinstance(sensor_name, str) or not sensor_name or sensor_name.startswith("-") or any(c in sensor_name for c in "\r\n\x00")):
+            return None
+        sensor = self._run_ipmi_command(
+            ["sdr", "get", sensor_name], is_raw_command=False, timeout=5,
+        ) if sensor_name else None
+        # These are the read-only commands used by ipmitool's Dell power monitor.
+        # SDR watts are quantized; do not combine them with precise OEM headroom.
+        raw_power = self._run_ipmi_command(["0x30", "0xb3", "0x0a", "0x00"], timeout=3)
+        raw_headroom = self._run_ipmi_command(["0x30", "0xbb"], timeout=3)
+        parts = [sensor] if sensor else []
+        for raw, length, label in ((raw_power, 7, "Instantaneous power"),
+                                   (raw_headroom, 4, "System Instantaneous Headroom")):
+            try:
+                data = bytes.fromhex(raw) if raw is not None else b""
+            except ValueError:
+                data = b""
+            if len(data) == length:
+                value = int.from_bytes(data[:2], "little")
+                if value != 0xffff:  # Do not publish a sentinel as a measurement.
+                    parts.append(f"{label}: {value} W")
+        return "\n".join(parts) if parts else None
 
     def parse_power_details(self, data):
-        """Use reported reading plus instantaneous headroom as capacity reference.
+        """Use OEM instantaneous power plus headroom as the capacity reference.
 
         Warning/failure thresholds and PSU nameplate ratings are not capacity.
         Keep unsupported/missing values unknown rather than estimating them.
         """
         values = {}
         labels = {
-            "reading": "reading_watts", "warning threshold": "warning_watts",
+            "reading": "reading_watts", "instantaneous power": "instantaneous_watts",
+            "warning threshold": "warning_watts",
             "failure threshold": "failure_watts",
             "system instantaneous headroom": "headroom_watts",
         }
@@ -456,8 +517,21 @@ class IPMIManager:
             match = re.fullmatch(r"\s*([^:]+):\s*(\d+(?:\.\d+)?)\s*W(?:att)?s?\s*", line, re.IGNORECASE)
             if match and (key := labels.get(match.group(1).strip().lower())):
                 values[key] = float(match.group(2))
-        if "reading_watts" in values and "headroom_watts" in values:
-            capacity = values["reading_watts"] + values["headroom_watts"]
+            sensor_reading = re.fullmatch(
+                r"\s*Sensor Reading\s*:\s*(\d+(?:\.\d+)?)(?:\s*\([^)]*\))?\s*W(?:att)?s?\s*",
+                line, re.IGNORECASE,
+            )
+            if sensor_reading:
+                values["reading_watts"] = float(sensor_reading.group(1))
+            threshold = re.fullmatch(
+                r"\s*Upper (non-critical|critical)\s*:\s*(\d+(?:\.\d+)?)\s*",
+                line, re.IGNORECASE,
+            )
+            if threshold:
+                key = "warning_watts" if threshold.group(1).lower() == "non-critical" else "failure_watts"
+                values[key] = float(threshold.group(2))
+        if "instantaneous_watts" in values and "headroom_watts" in values:
+            capacity = values["instantaneous_watts"] + values["headroom_watts"]
             if capacity > 0:
                 values["capacity_watts"] = capacity
         return values
@@ -466,7 +540,11 @@ class IPMIManager:
         """Read the chassis tamper state, not the discrete sensor's generic 'ok'."""
         for line in (sdr_data or "").splitlines():
             fields = [part.strip() for part in line.split("|")]
-            if len(fields) != 5 or "intrusion" not in fields[0].lower():
+            if len(fields) != 5:
+                continue
+            if "intrusion" not in fields[0].lower() and not (
+                self._has_sensor_type(fields, "Physical Security") and "chassis intrusion" in fields[4].lower()
+            ):
                 continue
             reading = fields[4].lower()
             active = None

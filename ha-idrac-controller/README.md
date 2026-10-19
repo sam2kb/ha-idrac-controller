@@ -62,14 +62,37 @@ A missing CPU reading stays unknown and does not shift the other socket's label.
 Battery health appears only when the SDR data exposes a battery, such as the
 CMOS battery. Voltage appears only if a numeric voltage is reported. These
 sensors use the existing SDR poll and do not estimate charge percentages.
-An unavailable battery reading is shown as Unknown.
+An unavailable battery reading is shown as Unknown. A readable discrete sensor
+with no asserted event shows No fault reported; that does not confirm a battery
+is installed.
 
-The dashboard shows watts and capacity used, for example 70 W (7.78% Capacity),
-when Dell's read-only power query reports a reading and instantaneous headroom.
-The capacity reference is that reading plus headroom; it is separate from PSU
-nameplate ratings and warning/failure thresholds. All are exposed as separate
-MQTT sensors. Missing or unsupported values remain unknown. This optional query
-runs at most once a minute, after cooling control, with a five-second timeout.
+The dashboard shows watts and capacity used when the server reports enough data.
+Capacity reference uses Dell's instantaneous power reading plus instantaneous
+headroom. The ordinary SDR watt reading can be rounded and is not used to
+calculate that reference. PSU nameplate ratings and warning/failure thresholds
+are separate measurements. Missing or unsupported values remain unknown.
+Dell total-power reads work independently of sensor labels and also supply
+watts when no recognized system SDR sensor is available. An arbitrary board or
+PSU watt sensor is never treated as total server power. Power details refresh
+at most once a minute, after cooling control. The threshold
+query times out after five seconds; each of the two Dell read queries times out
+after three seconds. These queries do not change power caps or server settings.
+
+Sensor discovery uses standard IPMI types and entity IDs where available, with
+Dell label fallbacks for older firmware. Battery, Power Supply, and Physical
+Security identities refresh in rotation, one type per minute with a five-second
+timeout, after cooling control. Values always come from the current SDR poll.
+CPU and inlet identification also recognizes standard processor and air-inlet
+entities. Exhaust labels remain a fallback because generic IPMI has no universal
+exhaust-temperature entity. An absent exhaust sensor stays unknown; target fan
+speed stays unknown when the app is not setting a manual speed.
+
+PSU problem sensors decode asserted failure and lost-input events even when a
+presence message is missing. Unreadable or missing readings make a previously
+discovered PSU unavailable. An empty PSU bay does not create a failure sensor.
+Firmware, installed hardware, privileges, and licensing determine which optional
+measurements are available. Parser tests cover iDRAC 7/8 output variants; they do
+not establish that every model and firmware version has been tested on hardware.
 
 System Board Intrusion is an MQTT tamper sensor for alerts. On means intrusion
 is asserted; off means clear. Missing readings make the sensor unavailable.

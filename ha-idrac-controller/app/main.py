@@ -57,6 +57,9 @@ class ServerWorker:
         self.server_info = {}
         self.discovered_sensors = set()
         self._known_batteries = {}
+        self._known_psus = {}
+        self._next_sensor_inventory = 0.0
+        self._sensor_inventory_index = 0
         self._intrusion_seen = False
         self._power_details = {}
         self._next_power_details = 0.0
@@ -104,6 +107,8 @@ class ServerWorker:
         self._log("info", "MQTT connected; refreshing discovery and power permissions.")
         self.discovered_sensors.clear()
         self.mqtt.publish(f"{self.mqtt.base_topic}/intrusion/availability", "offline", retain=True)
+        for name in self._known_psus:
+            self.mqtt.publish(f"{self.mqtt.base_topic}/psu/{name}/availability", "offline", retain=True)
         for action, description in POWER_ACTIONS.items():
             command_topic = f"{self.mqtt.base_topic}/command/{action}"
             # Remove any broker-stored command before subscribing on reconnect.
@@ -240,9 +245,6 @@ class ServerWorker:
             fans = self.ipmi.parse_fan_rpms(self.ipmi.retrieve_fan_rpms_raw())
             power_sdr_data = self.ipmi.retrieve_power_sdr_raw()
             power = self.ipmi.parse_power_consumption(power_sdr_data)
-            psu_statuses = self.ipmi.get_power_status(power_sdr_data)
-            batteries = self.ipmi.parse_battery_status(power_sdr_data)
-            intrusion = self.ipmi.parse_intrusion_status(power_sdr_data)
 
             hottest_cpu = max(temps['cpu_temps']) if temps['cpu_temps'] else None
             target_fan_speed = "Dell Auto"
@@ -312,7 +314,13 @@ class ServerWorker:
 
             # Optional telemetry is read after applying cooling, at most once
             # a minute with a bounded timeout; never delay a fan hand-back.
-            self._refresh_power_details()
+            self._refresh_sensor_inventory()
+            psu_statuses = self.ipmi.get_power_status(power_sdr_data)
+            batteries = self.ipmi.parse_battery_status(power_sdr_data)
+            intrusion = self.ipmi.parse_intrusion_status(power_sdr_data)
+            self._refresh_power_details(power_sdr_data)
+            if power is None:
+                power = self._power_details.get("instantaneous_watts")
             self._update_status(temps, fans, power, psu_statuses, target_fan_speed, batteries, intrusion)
             self._sleep(max(0.1, self.global_opts["check_interval_seconds"] - (time.time() - start_time)))
 
@@ -324,12 +332,31 @@ class ServerWorker:
             return "Unknown (Dell auto hand-back failed)"
         return f"Dell Auto ({reason})" if reason else "Dell Auto"
 
-    def _refresh_power_details(self):
+    def _refresh_sensor_inventory(self):
+        # Spread optional type discovery over cycles; use current SDR values,
+        # never the readings returned by a previous inventory query.
+        now = time.monotonic()
+        if now < self._next_sensor_inventory:
+            return
+        self._next_sensor_inventory = now + 60
+        types = ("Battery", "Power Supply", "Physical Security")
+        self.ipmi.refresh_sensor_type(types[self._sensor_inventory_index])
+        self._sensor_inventory_index = (self._sensor_inventory_index + 1) % len(types)
+
+    def _refresh_power_details(self, sdr_data):
         now = time.monotonic()
         if now < self._next_power_details:
             return
         self._next_power_details = now + 60
-        self._power_details = self.ipmi.parse_power_details(self.ipmi.retrieve_power_details_raw())
+        sensor_name = self.ipmi.get_power_sensor_name(sdr_data)
+        raw = self.ipmi.retrieve_power_details_raw(sensor_name)
+        details = self.ipmi.parse_power_details(raw)
+        # Threshold and OEM reads are independent. The normal SDR poll can
+        # supply the power reading if the verbose sensor lookup failed.
+        reading = self.ipmi.parse_power_consumption(sdr_data)
+        if "reading_watts" not in details and reading is not None:
+            details["reading_watts"] = reading
+        self._power_details = details
 
     def _update_status(self, temps, fans, power, psu_statuses, target_fan_speed, batteries=None, intrusion=None):
         # Keep an already discovered battery visible as unknown if a later
@@ -338,6 +365,9 @@ class ServerWorker:
                                  for name in self._known_batteries}
         self._known_batteries.update({battery["name"]: battery for battery in (batteries or [])})
         batteries = list(self._known_batteries.values())
+        self._known_psus = {name: {"name": name, "ok": None} for name in self._known_psus}
+        self._known_psus.update({psu["name"]: psu for psu in psu_statuses})
+        psu_statuses = list(self._known_psus.values())
         cpu_ids = temps.get("cpu_ids", list(range(1, len(temps.get("cpu_temps", [])) + 1)))
         self._intrusion_seen = self._intrusion_seen or intrusion is not None
         capacity = self._power_details.get("capacity_watts")
@@ -443,7 +473,7 @@ class ServerWorker:
         for fan in status.get('fans', []):
             sensors[f"fan_{re.sub(r'[^a-zA-Z0-9_]+', '', fan['name']).lower()}_rpm"] = {"component": "sensor", "name": f"{fan['name']} RPM", "unit": "RPM", "icon": "mdi:fan", "suggested_display_precision": 0}
         for psu in status.get('psus', []):
-            sensors[f"psu_{re.sub(r'[^a-zA-Z0-9_]+', '', psu['name']).lower()}"] = {"component": "binary_sensor", "name": psu['name'], "device_class": "problem", "entity_category": "diagnostic"}
+            sensors[f"psu_{re.sub(r'[^a-zA-Z0-9_]+', '', psu['name']).lower()}"] = {"component": "binary_sensor", "name": psu['name'], "device_class": "problem", "entity_category": "diagnostic", "extra_availability_topic": f"{self.mqtt.base_topic}/psu/{psu['name']}/availability"}
 
         for slug, desc in sensors.items():
             if slug not in self.discovered_sensors:
@@ -482,8 +512,10 @@ class ServerWorker:
             elif desc['component'] == 'binary_sensor' and slug.startswith('psu_'):
                 psu_name = desc['name']
                 psu_data = next((p for p in status['psus'] if p['name'] == psu_name), None)
-                state = "ON" if psu_data and not psu_data['ok'] else "OFF"
-                self.mqtt.publish_state('binary_sensor', slug, state)
+                ok = psu_data["ok"] if psu_data else None
+                self.mqtt.publish(desc["extra_availability_topic"], "online" if ok is not None else "offline", retain=True)
+                if ok is not None:
+                    self.mqtt.publish_state("binary_sensor", slug, "OFF" if ok else "ON")
 
     def cleanup(self):
         if self.config.get('fan_control_enabled', True):

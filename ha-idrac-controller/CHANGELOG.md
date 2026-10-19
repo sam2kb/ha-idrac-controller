@@ -1,3 +1,17 @@
+## 1.0.10 - 2026-10-19
+
+- Discover sensor identities using standard IPMI types and entity IDs, retaining
+  Dell label fallbacks. Recognize generic battery and PSU labels and standard
+  air-inlet entities; ignore unavailable temperature and fan readings.
+- Read power thresholds from the discovered system watt sensor instead of the
+  Dell CLI that assumes System Level. Keep partial results when optional reads
+  fail. Derive capacity from Dell instantaneous power and headroom, avoiding
+  errors from rounded SDR readings and rejecting ambiguous system sensors.
+- Decode PSU failure, predictive failure, and lost-input events even without a
+  presence message. Make missing or unreadable PSU data unavailable in MQTT.
+- Decode readable battery sensors with no asserted events as No fault reported.
+  Preserve unknown readings and avoid inferring that an optional battery exists.
+
 ## 1.0.9 - 2026-10-18
 
 - Show watts alongside capacity used when Dell reports instantaneous power

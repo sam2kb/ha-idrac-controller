@@ -38,6 +38,7 @@ def make_worker(monkeypatch, tmp_path):
         item.ipmi.retrieve_fan_rpms_raw = Mock(return_value="")
         item.ipmi.retrieve_power_sdr_raw = Mock(return_value="")
         item.ipmi.retrieve_power_details_raw = Mock(return_value=None)
+        item.ipmi.refresh_sensor_type = Mock()
         item.ipmi.apply_user_fan_control_profile = Mock(return_value="")
         item.ipmi.apply_dell_fan_control_profile = Mock(return_value="")
         item.ipmi.get_server_model_info = Mock(return_value={})
@@ -478,7 +479,8 @@ Warning threshold : 896 W
 Failure threshold : 980 W
 Amperage value: 0.6 A
 Headroom
-System Instantaneous Headroom : 830 W
+Instantaneous power : 83 W
+System Instantaneous Headroom : 817 W
 System Peak Headroom : 800 W
 """
 
@@ -508,20 +510,22 @@ def test_optional_power_poll_is_throttled_and_runs_after_cooling(make_worker, mo
     item = make_worker(fan_mode="auto")
     events = []
     item.ipmi.apply_dell_fan_control_profile.side_effect = lambda: events.append("cooling") or ""
-    item.ipmi.retrieve_power_details_raw.side_effect = lambda: events.append("power-read") or POWER_DETAILS
+    sdr_data = "Pwr Consumption | 77h | ok | 7.1 | 70 Watts"
+    item.ipmi.retrieve_power_sdr_raw.return_value = sdr_data
+    item.ipmi.retrieve_power_details_raw.side_effect = lambda name: events.append("power-read") or POWER_DETAILS
     clock = Mock(return_value=1000)
     monkeypatch.setattr(main.time, "monotonic", clock)
     run_cycles(item)
     assert events == ["cooling", "power-read"]
     assert item._power_details["capacity_watts"] == 900
-    item._refresh_power_details()
+    item._refresh_power_details(sdr_data)
     assert item.ipmi.retrieve_power_details_raw.call_count == 1
     clock.return_value = 1061
     item.ipmi.retrieve_power_details_raw.side_effect = None
     item.ipmi.retrieve_power_details_raw.return_value = None
-    item._refresh_power_details()
+    item._refresh_power_details(sdr_data)
     assert item.ipmi.retrieve_power_details_raw.call_count == 2
-    assert item._power_details == {}
+    assert item._power_details == {"reading_watts": 70}
 
 
 def test_intrusion_publishes_tamper_state_and_unavailable_when_reading_missing(make_worker):
@@ -548,3 +552,75 @@ def test_intrusion_publishes_tamper_state_and_unavailable_when_reading_missing(m
     assert payloads[f"{item.mqtt.base_topic}/intrusion/availability"] == "offline"
     assert f"{item.mqtt.base_topic}/binary_sensor/system_board_intrusion" not in payloads
     assert main.ALL_SERVERS_STATUS[item.alias]["intrusion_active"] is None
+
+
+
+def test_headroom_does_not_use_quantized_sdr_reading_as_capacity_input(make_worker):
+    item = make_worker()
+    item.ipmi.retrieve_power_details_raw.return_value = "System Instantaneous Headroom: 830 W"
+    item._refresh_power_details("Pwr Consumption | 77h | ok | 7.1 | 70 Watts")
+    item.ipmi.retrieve_power_details_raw.assert_called_once_with("Pwr Consumption")
+    assert item._power_details == {"headroom_watts": 830, "reading_watts": 70}
+
+
+def test_missing_power_sensor_still_reads_oem_data_without_guessing_a_name(make_worker):
+    item = make_worker()
+    item._refresh_power_details("CPU1 Temp | 01h | ok | 3.1 | 35 degrees C")
+    item.ipmi.retrieve_power_details_raw.assert_called_once_with(None)
+    assert item._power_details == {}
+
+
+def test_psu_fault_discovery_and_unavailable_on_missing_reading(make_worker):
+    import json
+    item = make_worker()
+    item._initialize()
+    del item._publish_mqtt_data
+    item.mqtt.is_connected = True
+    temperatures = {"cpu_temps": [35]}
+    for ok in (False, True):
+        item._update_status(temperatures, [], 70, [{"name": "PSU1", "ok": ok}], "Dell Auto")
+        payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+        assert payloads[f"{item.mqtt.base_topic}/binary_sensor/psu_psu1"] == ("OFF" if ok else "ON")
+        assert payloads[f"{item.mqtt.base_topic}/psu/PSU1/availability"] == "online"
+    discovery = json.loads(payloads["homeassistant/binary_sensor/idrac_controller_fixture_psu_psu1/config"])
+    assert discovery["device_class"] == "problem"
+    assert discovery["availability"][-1]["topic"] == f"{item.mqtt.base_topic}/psu/PSU1/availability"
+    for psus in ([{"name": "PSU1", "ok": None}], []):
+        item.mqtt.publish.reset_mock()
+        item._update_status(temperatures, [], 70, psus, "Dell Auto")
+        payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+        assert payloads[f"{item.mqtt.base_topic}/psu/PSU1/availability"] == "offline"
+        assert f"{item.mqtt.base_topic}/binary_sensor/psu_psu1" not in payloads
+        assert main.ALL_SERVERS_STATUS[item.alias]["psu_statuses"][0]["ok"] is None
+    item.mqtt.publish.reset_mock()
+    item._on_mqtt_connected()
+    item.mqtt.publish.assert_any_call(f"{item.mqtt.base_topic}/psu/PSU1/availability", "offline", retain=True)
+
+
+def test_type_discovery_is_throttled_and_rotates_standard_classes_after_cooling(make_worker, monkeypatch):
+    item = make_worker(fan_mode="auto")
+    events = []
+    item.ipmi.apply_dell_fan_control_profile.side_effect = lambda: events.append("cooling") or ""
+    item.ipmi.refresh_sensor_type.side_effect = lambda kind: events.append(kind)
+    clock = Mock(return_value=1000)
+    monkeypatch.setattr(main.time, "monotonic", clock)
+    run_cycles(item)
+    assert events == ["cooling", "Battery"]
+    item._refresh_sensor_inventory()
+    assert events == ["cooling", "Battery"]
+    for now in (1060, 1120, 1180):
+        clock.return_value = now
+        item._refresh_sensor_inventory()
+    assert events == ["cooling", "Battery", "Power Supply", "Physical Security", "Battery"]
+
+
+def test_worker_reads_total_power_with_unfamiliar_sdr_labels(make_worker):
+    item = make_worker(fan_control_enabled=False)
+    item.ipmi.retrieve_power_sdr_raw.return_value = "Component Power | 77h | ok | 7.1 | 126 Watts"
+    item.ipmi.retrieve_power_details_raw.return_value = "Instantaneous power: 83 W\nSystem Instantaneous Headroom: 817 W"
+    run_cycles(item)
+    item.ipmi.retrieve_power_details_raw.assert_called_once_with(None)
+    assert main.ALL_SERVERS_STATUS[item.alias]["power_consumption_watts"] == 83
+    assert main.ALL_SERVERS_STATUS[item.alias]["power_capacity_watts"] == 900
+    item.ipmi.apply_dell_fan_control_profile.assert_not_called()
+    item.ipmi.apply_user_fan_control_profile.assert_not_called()

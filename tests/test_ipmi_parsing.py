@@ -231,24 +231,70 @@ def test_multiple_batteries_are_independent_and_do_not_create_charge_percentages
 
 def test_power_details_parse_only_reported_capacity_inputs_and_thresholds():
     manager = make_manager()
-    data = "Reading: 70 W\nWarning threshold: 896 W\nFailure threshold: 980 W\nSystem Instantaneous Headroom: 830 W\n"
+    data = "Reading: 70 W\nWarning threshold: 896 W\nFailure threshold: 980 W\nInstantaneous power: 83 W\nSystem Instantaneous Headroom: 817 W\n"
     result = manager.parse_power_details(data)
     assert result == {"reading_watts": 70, "warning_watts": 896, "failure_watts": 980,
-                      "headroom_watts": 830, "capacity_watts": 900}
+                      "instantaneous_watts": 83, "headroom_watts": 817, "capacity_watts": 900}
     assert "capacity_watts" not in manager.parse_power_details("Warning threshold: 896 W\nFailure threshold: 980 W")
     assert manager.parse_power_details(None) == {}
     assert "capacity_watts" not in manager.parse_power_details("Reading: 0 W\nSystem Instantaneous Headroom: 0 W")
     assert "capacity_watts" not in manager.parse_power_details("Reading: 70 BTU/hr\nSystem Instantaneous Headroom: 830 BTU/hr")
 
 
-def test_optional_power_details_query_is_read_only_and_bounded(monkeypatch):
+def test_optional_power_queries_use_discovered_sensor_and_read_only_headroom(monkeypatch):
+    from unittest.mock import Mock, call
+    manager = make_manager()
+    output = "Sensor Reading : 70 (+/- 7) Watts\nUpper non-critical : 896.000\nUpper critical : 980.000"
+    run = Mock(side_effect=[output, "53 00 07 00 00 00 00", "31 03 20 03"])
+    monkeypatch.setattr(manager, "_run_ipmi_command", run)
+    raw = manager.retrieve_power_details_raw("Pwr Consumption")
+    assert run.call_args_list == [
+        call(["sdr", "get", "Pwr Consumption"], is_raw_command=False, timeout=5),
+        call(["0x30", "0xb3", "0x0a", "0x00"], timeout=3),
+        call(["0x30", "0xbb"], timeout=3),
+    ]
+    assert manager.parse_power_details(raw) == {
+        "reading_watts": 70, "warning_watts": 896, "failure_watts": 980,
+        "instantaneous_watts": 83, "headroom_watts": 817, "capacity_watts": 900,
+    }
+
+
+def test_power_sensor_name_comes_from_real_sdr_inventory():
+    manager = make_manager()
+    assert manager.get_power_sensor_name(ELIST) == "Pwr Consumption"
+    assert manager.get_power_sensor_name("System Level | 77h | ok | 7.1 | 70 Watts") == "System Level"
+    assert manager.get_power_sensor_name("PS1 Input | 10h | ok | 10.1 | 70 Watts") is None
+    assert manager.get_power_sensor_name(None) is None
+
+
+def test_partial_power_results_survive_independent_query_failure(monkeypatch):
     from unittest.mock import Mock
     manager = make_manager()
-    run = Mock(return_value="fixture")
+    run = Mock(side_effect=["Upper non-critical : 896.000\nUpper critical : 980.000", None, None])
     monkeypatch.setattr(manager, "_run_ipmi_command", run)
-    assert manager.retrieve_power_details_raw() == "fixture"
-    run.assert_called_once_with(["delloem", "powermonitor", "powerconsumption", "watt"],
-                                is_raw_command=False, timeout=5)
+    values = manager.parse_power_details(manager.retrieve_power_details_raw("Pwr Consumption"))
+    assert values == {"warning_watts": 896, "failure_watts": 980}
+    run.side_effect = [None, None, "3e 03 20 03"]
+    assert manager.parse_power_details(manager.retrieve_power_details_raw("System Level")) == {"headroom_watts": 830}
+    run.reset_mock()
+    assert manager.retrieve_power_details_raw("invalid\nname") is None
+    run.assert_not_called()
+
+
+def test_malformed_headroom_does_not_invent_capacity(monkeypatch):
+    from unittest.mock import Mock
+    manager = make_manager()
+    for raw in ("", "bad data", "3e 03", "3e 03 20 03 00"):
+        monkeypatch.setattr(manager, "_run_ipmi_command", Mock(side_effect=["Upper critical : 980.000", None, raw]))
+        assert manager.parse_power_details(manager.retrieve_power_details_raw("Pwr Consumption")) == {"failure_watts": 980}
+
+
+def test_readable_battery_with_no_asserted_events_does_not_require_presence_text():
+    manager = make_manager()
+    for reading in ("", "0x00", "0x0000", "State Deasserted"):
+        result = manager.parse_battery_status(f"CMOS Battery | 0Fh | ok | 23.1 | {reading}")
+        assert result[0]["health"] == "No fault reported"
+    assert manager.parse_battery_status("ROMB Battery | 10h | ns | 23.2 | No Reading")[0]["health"] == "Unknown"
 
 
 def test_intrusion_is_decoded_from_assertions_not_generic_ok_status():
@@ -264,3 +310,123 @@ def test_intrusion_is_decoded_from_assertions_not_generic_ok_status():
         }
     assert manager.parse_intrusion_status(ELIST) is None
     assert manager.parse_intrusion_status(None) is None
+
+
+def test_psu_standard_assertions_and_unknown_readings_across_label_styles():
+    for name in ("PS1 Status", "PSU1 Status", "Status"):
+        for reading in ("Presence detected, Power Supply AC lost", "AC-Lost-Out-Range",
+                        "Power Supply input lost (AC/DC)", "Predictive failure", "Configuration error"):
+            row = f"{name} | 0Ah | ok | 10.1 | {reading}"
+            assert make_manager().get_power_status(row) == [{"name": "PSU1", "ok": False}]
+        assert make_manager().get_power_status(f"{name} | 0Ah | ns | 10.1 | No Reading") == [{"name": "PSU1", "ok": None}]
+    data = "Status | 0Ah | ok | 10.1 | Presence detected\nPG Fail | 0Ch | nr | 10.1 |"
+    assert make_manager().get_power_status(data) == [{"name": "PSU1", "ok": False}]
+    # An unavailable PG sensor cannot establish that the PSU is healthy.
+    assert make_manager().get_power_status(data.replace("nr", "ns")) == [{"name": "PSU1", "ok": None}]
+
+
+def test_typed_inventory_classifies_unfamiliar_names_and_keeps_only_identities(monkeypatch):
+    from unittest.mock import Mock, call
+    manager = make_manager()
+    rows = {
+        "Battery": "Backup Cell | 0Fh | ok | 23.1 | Presence detected",
+        "Power Supply": "Supply State | 0Ah | ok | 10.2 | Presence detected",
+        "Physical Security": "Security | 73h | ok | 23.1 | General Chassis intrusion",
+    }
+    run = Mock(side_effect=lambda args, **kwargs: rows[args[2]])
+    monkeypatch.setattr(manager, "_run_ipmi_command", run)
+    for sensor_type in rows:
+        manager.refresh_sensor_type(sensor_type)
+    assert run.call_args_list == [call(["sdr", "type", kind], is_raw_command=False, timeout=5) for kind in rows]
+    assert manager.parse_battery_status(rows["Battery"].replace("Presence detected", "Low"))[0]["health"] == "Low"
+    assert manager.get_power_status(rows["Power Supply"].replace("Presence detected", "Power Supply AC lost")) == [{"name": "PSU2", "ok": False}]
+    assert manager.parse_intrusion_status(rows["Physical Security"])["active"] is True
+    assert manager.parse_battery_status(None) == []
+    assert manager.get_power_status(None) == []
+    assert manager.parse_intrusion_status(None) is None
+    # Discovery values must never become cached healthy telemetry.
+    unreadable = rows["Power Supply"].replace("ok", "ns").replace("Presence detected", "No Reading")
+    assert manager.get_power_status(unreadable) == [{"name": "PSU2", "ok": None}]
+    run.side_effect = None
+    run.return_value = None
+    manager.refresh_sensor_type("Battery")
+    assert manager.parse_battery_status(rows["Battery"])[0]["health"] == "Healthy"
+    run.return_value = ""
+    manager.refresh_sensor_type("Battery")
+    assert manager.parse_battery_status(rows["Battery"]) == []
+
+
+def test_standard_battery_entity_and_generic_states():
+    manager = make_manager()
+    for reading, expected in (("Present", "Healthy"), ("State Asserted", "Warning"),
+                              ("State Deasserted", "No fault reported")):
+        assert manager.parse_battery_status(f"Cell | 0Fh | ok | 40.1 | {reading}")[0]["health"] == expected
+    assert manager.parse_battery_status("Cell | 0Fh | ns | 40.1 | Present")[0]["health"] == "Unknown"
+
+
+def test_system_power_selection_excludes_psu_input_and_ambiguous_board_sensors():
+    manager = make_manager()
+    psu = "PS1 Input | 10h | ok | 10.1 | 180 Watts"
+    system = "Total Draw | 77h | ok | 7.1 | 126 Watts"
+    assert manager.get_power_sensor_name(psu + "\n" + system) is None
+    assert manager.parse_power_consumption(psu + "\n" + system) is None
+    assert manager.get_power_sensor_name(psu) is None
+    assert manager.get_power_sensor_name(system + "\n" + system.replace("Total Draw", "Other Draw")) is None
+    assert manager.get_power_sensor_name(system.replace("ok", "ns")) is None
+    for alias in ("System Level", "Pwr Consumption"):
+        row = f"{alias} | 77h | ok | 7.1 | 70 Watts"
+        assert manager.parse_power_consumption(row) == 70
+        assert manager.get_power_sensor_name(psu + "\n" + row) == alias
+
+
+def test_oem_power_lengths_and_partial_support_are_independent(monkeypatch):
+    from unittest.mock import Mock
+    manager = make_manager()
+    for raw in (None, "", "bad", "53 00", "53 00 00 00 00 00", "ff ff 00 00 00 00 00"):
+        monkeypatch.setattr(manager, "_run_ipmi_command", Mock(side_effect=[None, raw, "31 03 20 03"]))
+        values = manager.parse_power_details(manager.retrieve_power_details_raw("Total Draw"))
+        assert values == {"headroom_watts": 817}
+    monkeypatch.setattr(manager, "_run_ipmi_command", Mock(side_effect=[None, "53 00 07 00 00 00 00", None]))
+    assert manager.parse_power_details(manager.retrieve_power_details_raw("System Level")) == {"instantaneous_watts": 83}
+    assert "capacity_watts" not in manager.parse_power_details("Reading: 70 W\nSystem Instantaneous Headroom: 817 W")
+
+
+def test_standard_processor_and_air_inlet_entities_do_not_require_dell_labels():
+    data = "Socket | 01h | ucr | 3.2 | 95 degrees C\nAmbient | 02h | ok | 55.1 | 24 degrees C\nDIMM | 03h | ok | 32.1 | 50 degrees C"
+    result = make_manager().parse_temperatures(data)
+    assert result["cpu_ids"] == [2]
+    assert result["cpu_temps"] == [95]
+    assert result["inlet_temp"] == 24
+    assert make_manager().parse_temperatures(data.replace("ucr", "ns"))["cpu_temps"] == []
+
+
+def test_physical_security_type_does_not_turn_unrelated_security_alarm_into_intrusion(monkeypatch):
+    from unittest.mock import Mock
+    manager = make_manager()
+    row = "Security | 73h | ok | 23.1 | LAN Leash lost"
+    monkeypatch.setattr(manager, "_run_ipmi_command", Mock(return_value=row))
+    manager.refresh_sensor_type("Physical Security")
+    assert manager.parse_intrusion_status(row) is None
+
+
+def test_duplicate_sensor_names_do_not_select_psu_input_as_system_power():
+    data = "Total Draw | 10h | ok | 10.1 | 180 Watts\nTotal Draw | 77h | ok | 7.1 | 126 Watts"
+    manager = make_manager()
+    assert manager.get_power_sensor_name(data) is None
+    assert manager.parse_power_consumption(data) is None
+
+
+def test_unavailable_fan_reading_is_not_a_valid_speed():
+    assert make_manager().parse_fan_rpms("Fan1 | 30h | ns | 7.1 | 0 RPM") == []
+    assert make_manager().parse_fan_rpms("Fan1 | 30h | lcr | 7.1 | 0 RPM") == [{"name": "Fan1", "rpm": 0}]
+
+
+def test_dell_total_power_and_headroom_do_not_depend_on_sensor_labels(monkeypatch):
+    from unittest.mock import Mock, call
+    manager = make_manager()
+    run = Mock(side_effect=["53 00 07 00 00 00 00", "31 03 20 03"])
+    monkeypatch.setattr(manager, "_run_ipmi_command", run)
+    values = manager.parse_power_details(manager.retrieve_power_details_raw(None))
+    assert values == {"instantaneous_watts": 83, "headroom_watts": 817, "capacity_watts": 900}
+    assert run.call_args_list == [call(["0x30", "0xb3", "0x0a", "0x00"], timeout=3),
+                                 call(["0x30", "0xbb"], timeout=3)]
