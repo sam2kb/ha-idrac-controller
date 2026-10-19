@@ -1,3 +1,17 @@
+## 1.0.11 - 2026-10-19
+
+- Add Save and reload app using Supervisor's self-restart API. Keep the progress
+  page inside ingress on web and mobile, confirm a new app process, and return
+  to Manage Servers. Regular Save now shows a notice without a restart link.
+- Save configuration atomically before reloading. Report rejected or failed
+  restarts without exposing credentials or retrying the request automatically.
+- Expose available additional SDR readings as MQTT diagnostic sensors and in
+  the dashboard, preserving units, zero values, discrete states, and stable
+  sensor identities. Skip unset/unreadable/raw-code values and duplicate core
+  numeric readings; mark previously seen readings unavailable if they disappear.
+- Expose decoded Dell instantaneous power/current and instantaneous/peak
+  headroom from the existing power queries, excluding reserved/sentinel fields.
+
 ## 1.0.10 - 2026-10-19
 
 - Discover sensor identities using standard IPMI types and entity IDs, retaining

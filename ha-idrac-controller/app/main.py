@@ -11,6 +11,7 @@ from .ipmi_manager import IPMIManager
 from .mqtt_client import MqttClient
 from .mqtt_config import resolve_mqtt_config
 from .power_control import POWER_ACTIONS
+from .sensor_readings import parse_sdr_readings
 from .pid_controller import PIDController
 from . import web_server
 
@@ -58,6 +59,8 @@ class ServerWorker:
         self.discovered_sensors = set()
         self._known_batteries = {}
         self._known_psus = {}
+        self._known_readings = {}
+        self._reading_metadata = {}
         self._next_sensor_inventory = 0.0
         self._sensor_inventory_index = 0
         self._intrusion_seen = False
@@ -106,6 +109,9 @@ class ServerWorker:
         """Refresh discovery and expose only explicitly enabled power actions."""
         self._log("info", "MQTT connected; refreshing discovery and power permissions.")
         self.discovered_sensors.clear()
+        self._reading_metadata.clear()
+        for slug in self._known_readings:
+            self.mqtt.publish(f"{self.mqtt.base_topic}/reading/{slug}/availability", "offline", retain=True)
         self.mqtt.publish(f"{self.mqtt.base_topic}/intrusion/availability", "offline", retain=True)
         for name in self._known_psus:
             self.mqtt.publish(f"{self.mqtt.base_topic}/psu/{name}/availability", "offline", retain=True)
@@ -242,7 +248,8 @@ class ServerWorker:
                 self.mqtt.publish(self.mqtt.availability_topic, "online", retain=True)
 
             temps = self.ipmi.parse_temperatures(raw_temp_data)
-            fans = self.ipmi.parse_fan_rpms(self.ipmi.retrieve_fan_rpms_raw())
+            raw_fan_data = self.ipmi.retrieve_fan_rpms_raw()
+            fans = self.ipmi.parse_fan_rpms(raw_fan_data)
             power_sdr_data = self.ipmi.retrieve_power_sdr_raw()
             power = self.ipmi.parse_power_consumption(power_sdr_data)
 
@@ -321,7 +328,8 @@ class ServerWorker:
             self._refresh_power_details(power_sdr_data)
             if power is None:
                 power = self._power_details.get("instantaneous_watts")
-            self._update_status(temps, fans, power, psu_statuses, target_fan_speed, batteries, intrusion)
+            readings = self._additional_readings(power_sdr_data, raw_temp_data, raw_fan_data)
+            self._update_status(temps, fans, power, psu_statuses, target_fan_speed, batteries, intrusion, readings)
             self._sleep(max(0.1, self.global_opts["check_interval_seconds"] - (time.time() - start_time)))
 
     def _use_dell_auto(self, reason=None):
@@ -358,7 +366,40 @@ class ServerWorker:
             details["reading_watts"] = reading
         self._power_details = details
 
-    def _update_status(self, temps, fans, power, psu_statuses, target_fan_speed, batteries=None, intrusion=None):
+    def _additional_readings(self, sdr_data, temperature_data=None, fan_data=None):
+        # Full SDR is preferred when a record also appears in a typed query.
+        data = "\n".join(part for part in (temperature_data, fan_data, sdr_data) if part)
+        power_name = self.ipmi.get_power_sensor_name(sdr_data)
+        readings = []
+        for reading in parse_sdr_readings(data):
+            row = reading.pop("source_row")
+            # Reuse the existing parsers to avoid duplicate numeric entities or
+            # a second, divergent definition of CPU/inlet/exhaust/fan sensors.
+            temperatures = self.ipmi.parse_temperatures(row) if reading["unit"] == "°C" else {}
+            if (temperatures.get("cpu_temps") or temperatures.get("inlet_temp") is not None
+                    or temperatures.get("exhaust_temp") is not None):
+                continue
+            if reading["unit"] == "RPM" and self.ipmi.parse_fan_rpms(row):
+                continue
+            if row.split("|", 1)[0].strip() == power_name and reading["unit"] == "W":
+                continue
+            readings.append(reading)
+        # These decoded fields were already returned by the existing optional
+        # Dell queries. Reserved bytes and sentinel values are never exposed.
+        for slug, name, key, unit, device_class in (
+            ("dell_instantaneous_power", "Instantaneous power", "instantaneous_watts", "W", "power"),
+            ("dell_instantaneous_current", "Instantaneous current", "current_amps", "A", "current"),
+            ("dell_instantaneous_headroom", "Instantaneous power headroom", "headroom_watts", "W", "power"),
+            ("dell_peak_headroom", "Peak power headroom", "peak_headroom_watts", "W", "power"),
+        ):
+            value = self._power_details.get(key)
+            if value is not None:
+                readings.append({"slug": slug, "name": name, "value": value, "unit": unit,
+                                 "device_class": device_class, "state_class": "measurement",
+                                 "status": "ok", "source": "Dell OEM", "entity": None, "sensor_number": None})
+        return readings
+
+    def _update_status(self, temps, fans, power, psu_statuses, target_fan_speed, batteries=None, intrusion=None, readings=None):
         # Keep an already discovered battery visible as unknown if a later
         # read fails or no longer contains it, rather than leaving stale health.
         self._known_batteries = {name: {"name": name, "health": "Unknown", "voltage": None}
@@ -368,6 +409,9 @@ class ServerWorker:
         self._known_psus = {name: {"name": name, "ok": None} for name in self._known_psus}
         self._known_psus.update({psu["name"]: psu for psu in psu_statuses})
         psu_statuses = list(self._known_psus.values())
+        self._known_readings = {slug: {**item, "value": None} for slug, item in self._known_readings.items()}
+        self._known_readings.update({item["slug"]: item for item in (readings or [])})
+        readings = list(self._known_readings.values())
         cpu_ids = temps.get("cpu_ids", list(range(1, len(temps.get("cpu_temps", [])) + 1)))
         self._intrusion_seen = self._intrusion_seen or intrusion is not None
         capacity = self._power_details.get("capacity_watts")
@@ -389,6 +433,7 @@ class ServerWorker:
             "cpus": temps.get('cpu_temps', []),
             "cpu_ids": cpu_ids,
             "batteries": batteries,
+            "sensor_readings": readings,
             "fans": fans,
             "psus": psu_statuses,
         }
@@ -411,6 +456,7 @@ class ServerWorker:
                 "cpu_temps_c": temps.get('cpu_temps', []),
                 "cpu_ids": cpu_ids,
                 "batteries": batteries,
+                "sensor_readings": readings,
                 "actual_fan_rpms": fans,
                 "psu_statuses": psu_statuses,
             }
@@ -516,6 +562,30 @@ class ServerWorker:
                 self.mqtt.publish(desc["extra_availability_topic"], "online" if ok is not None else "offline", retain=True)
                 if ok is not None:
                     self.mqtt.publish_state("binary_sensor", slug, "OFF" if ok else "ON")
+
+        for reading in status.get("sensor_readings", []):
+            slug = reading["slug"]
+            availability = f"{self.mqtt.base_topic}/reading/{slug}/availability"
+            metadata = tuple(reading[key] for key in ("name", "unit", "device_class", "state_class"))
+            if self._reading_metadata.get(slug) != metadata:
+                self.mqtt.publish_discovery(
+                    component="sensor", slug=slug, name=reading["name"],
+                    unit=reading["unit"], device_class=reading["device_class"],
+                    state_class=reading["state_class"], entity_category="diagnostic",
+                    extra_availability_topic=availability, include_attributes=True,
+                    expire_after=3 * max(60, self.global_opts["check_interval_seconds"]),
+                )
+                self._reading_metadata[slug] = metadata
+            available = reading["value"] is not None
+            self.mqtt.publish(availability, "online" if available else "offline", retain=True)
+            if available:
+                attributes = {"ipmi_status": reading["status"], "entity": reading["entity"],
+                              "sensor_number": reading["sensor_number"], "source": reading.get("source", "IPMI SDR")}
+                value = reading["value"]
+                if isinstance(value, str) and len(value) > 255:
+                    attributes["full_reading"] = value
+                    value = value[:254] + "…"
+                self.mqtt.publish_state("sensor", slug, value, {"attributes": attributes})
 
     def cleanup(self):
         if self.config.get('fan_control_enabled', True):

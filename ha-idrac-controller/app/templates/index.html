@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>iDRAC Controller Dashboard</title>
     <link rel="stylesheet" href="static/style.css">
     <meta http-equiv="refresh" content="15">
@@ -62,6 +63,20 @@
                 {% else %}
                     <p>No fan RPM data available.</p>
                 {% endif %}
+                {% set available_readings = server.sensor_readings|default([])|rejectattr("value", "none")|list %}
+                {% if available_readings %}
+                <h3>Additional Sensor Readings</h3>
+                <div class="readings-scroll">
+                    <table class="readings-table">
+                        <thead><tr><th>Sensor</th><th>Reading</th><th>IPMI status</th></tr></thead>
+                        <tbody>
+                        {% for reading in available_readings %}
+                        <tr><td>{{ reading.name }}</td><td>{{ reading.value }}{% if reading.unit %} {{ reading.unit }}{% endif %}</td><td>{{ reading.status }}</td></tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% endif %}
             </div>
             {% endfor %}
         {% else %}
@@ -79,6 +94,9 @@
         .temp-list { display: flex; flex-wrap: wrap; gap: 8px; }
         .temp-badge { background-color: var(--secondary-background-color); padding: 5px 10px; border-radius: 12px; font-size: 0.9em; }
         .fan-list { column-count: 2; }
+        .readings-scroll { overflow-x: auto; }
+        .readings-table { width: 100%; border-collapse: collapse; }
+        .readings-table th, .readings-table td { text-align: left; padding: 8px; border-bottom: 1px solid var(--divider-color, #484848); }
         h2 small { font-size: 0.7em; color: var(--secondary-text-color); }
     </style>
 </body>

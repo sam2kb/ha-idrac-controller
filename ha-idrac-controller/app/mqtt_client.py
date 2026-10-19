@@ -151,7 +151,7 @@ class MqttClient:
 
     def publish_discovery(self, component, slug, name, device_class=None, unit=None, icon=None,
                           cmd_topic=None, val_template=None, state_class=None,
-                          entity_category=None, suggested_display_precision=None, extra_availability_topic=None):
+                          entity_category=None, suggested_display_precision=None, extra_availability_topic=None, include_attributes=False, expire_after=None):
         if not self.device_info_dict:
             return
 
@@ -196,6 +196,11 @@ class MqttClient:
         if component == 'sensor':
             payload["state_topic"] = f"{self.base_topic}/sensor/{slug}"
             payload["value_template"] = "{{ value_json.state }}"
+            if include_attributes:
+                payload["json_attributes_topic"] = payload["state_topic"]
+                payload["json_attributes_template"] = "{{ value_json.attributes | tojson }}"
+            if expire_after is not None:
+                payload["expire_after"] = expire_after
             if state_class:
                 payload["state_class"] = state_class
             if suggested_display_precision is not None:

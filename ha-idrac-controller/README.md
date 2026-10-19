@@ -94,9 +94,36 @@ Firmware, installed hardware, privileges, and licensing determine which optional
 measurements are available. Parser tests cover iDRAC 7/8 output variants; they do
 not establish that every model and firmware version has been tested on hardware.
 
+Available SDR readings also appear as MQTT diagnostic sensors and in the
+dashboard's Additional Sensor Readings table. This includes voltage, current,
+other temperatures, and discrete status messages. Existing CPU, inlet/exhaust,
+fan RPM, and total-power readings keep their entity IDs and are not duplicated.
+New entities require an actual reading: blank, unset, unreadable, opaque raw
+codes, and non-finite values are skipped. Zero is a valid reading. If a reading
+later disappears, its entity becomes unavailable and keeps its history.
+
+Additional sensor IDs use the IPMI sensor number and entity ID, so identical
+labels remain distinct. Sensor attributes include the source, IPMI status,
+entity ID, and sensor number. Decoded Dell instantaneous power, current, and
+instantaneous/peak headroom are also exposed when available; reserved fields
+are excluded. No extra per-sensor polling is needed.
+
 System Board Intrusion is an MQTT tamper sensor for alerts. On means intrusion
 is asserted; off means clear. Missing readings make the sensor unavailable.
 It uses the existing SDR poll and does not clear or acknowledge intrusion events.
+
+## Saving changes
+
+Save writes your server configuration and shows a notice to reload or restart
+the app. Save and reload app saves first, then asks Home Assistant Supervisor
+to restart HA iDRAC Controller. The progress page stays inside ingress on both
+web and mobile and returns to Manage Servers when the new app process responds.
+A failed reload leaves the saved configuration intact and shows an error.
+
+This restarts only the controller app. Home Assistant and your servers keep
+running. Normal shutdown cleanup returns custom cooling control to Dell auto;
+monitor-only servers keep their existing settings. The reload button is
+available when running as a Home Assistant app and needs no extra API privileges.
 
 ## Prerequisites
 
@@ -136,8 +163,8 @@ Most settings live in the app's web UI.
 2.  Start the app, then click Open Web UI.
 3.  Open Manage Servers and use the Add New Server form. It is pre-filled with
     the global defaults.
-4.  Restart the app after adding or editing servers. The saved message links to the app's
-    Info page, where you can choose Restart.
+4.  Choose Save and reload app to save the server and apply its settings. Regular
+    Save writes the configuration and shows a notice to reload later.
 
 ### Automatic MQTT setup
 
@@ -150,7 +177,7 @@ requires it.
 An older core-mosquitto default with no credentials also uses automatic setup.
 A manually entered host with credentials, or an external host, takes precedence.
 To switch an existing manual setup to automatic, clear the host, username and
-password, save, and restart the app.
+password, save the options, and restart this app.
 
 If the service is unavailable, the app retries while IPMI monitoring continues.
 Supervisor requests use a three-second connection timeout. External brokers
@@ -161,14 +188,14 @@ connection settings here.
 
 The dashboard shows live data for every enabled server and refreshes itself.
 The Manage Servers page adds, edits and deletes servers, and sets the fan mode
-and thresholds for each one. After saving a server, the page offers a link to
-the app's Info page to restart it.
+and thresholds for each one. Choose Save and reload app to apply the changes.
+Regular Save keeps the current running settings until the next reload.
 
 ## Server power actions
 
 Power buttons are disabled for every server by default, including servers saved
 before this option existed. In Manage Servers, open Edit and expand Server
-power actions. Enable each action separately, save, then restart this app.
+power actions. Enable each action separately, then choose Save and reload app.
 Only enabled actions appear in the Home Assistant device's configuration controls.
 
 - Power On System starts a server that is off.
@@ -208,7 +235,8 @@ Each server becomes a device named `iDRAC (<alias>)` with:
 - sensors for CPU temperatures, hottest CPU, inlet, exhaust, fan RPM, power and
   target fan speed
 
-Entity IDs derive from the alias and the sensor names. Rename them in Home
+Existing entity IDs derive from the alias and sensor names; additional SDR
+entities use the sensor number and entity ID. Rename them in Home
 Assistant if you need different IDs.
 
 ## Troubleshooting

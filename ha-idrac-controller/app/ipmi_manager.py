@@ -498,6 +498,12 @@ class IPMIManager:
                 value = int.from_bytes(data[:2], "little")
                 if value != 0xffff:  # Do not publish a sentinel as a measurement.
                     parts.append(f"{label}: {value} W")
+                secondary = int.from_bytes(data[2:4], "little")
+                if secondary != 0xffff:
+                    if length == 7:
+                        parts.append(f"Instantaneous current: {secondary / 10:g} A")
+                    else:
+                        parts.append(f"System Peak Headroom: {secondary} W")
         return "\n".join(parts) if parts else None
 
     def parse_power_details(self, data):
@@ -512,11 +518,15 @@ class IPMIManager:
             "warning threshold": "warning_watts",
             "failure threshold": "failure_watts",
             "system instantaneous headroom": "headroom_watts",
+            "system peak headroom": "peak_headroom_watts",
         }
         for line in (data or "").splitlines():
             match = re.fullmatch(r"\s*([^:]+):\s*(\d+(?:\.\d+)?)\s*W(?:att)?s?\s*", line, re.IGNORECASE)
             if match and (key := labels.get(match.group(1).strip().lower())):
                 values[key] = float(match.group(2))
+            amperage = re.fullmatch(r"\s*Instantaneous current\s*:\s*(\d+(?:\.\d+)?)\s*A\s*", line, re.IGNORECASE)
+            if amperage:
+                values["current_amps"] = float(amperage.group(1))
             sensor_reading = re.fullmatch(
                 r"\s*Sensor Reading\s*:\s*(\d+(?:\.\d+)?)(?:\s*\([^)]*\))?\s*W(?:att)?s?\s*",
                 line, re.IGNORECASE,

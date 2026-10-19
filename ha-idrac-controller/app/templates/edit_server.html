@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Edit {{ server.alias }}</title>
     <link rel="stylesheet" href="../../static/style.css">
 </head>
@@ -102,7 +103,8 @@
 
                 <hr>
                 {% include "_power_controls.html" %}
-                <div class="form-actions"><button type="submit">Save Changes</button></div>
+                <div class="form-actions"><button type="submit" name="action" value="save">Save</button>
+                    <button type="submit" name="action" value="save_reload" {% if not can_reload %}disabled title="Available when running as a Home Assistant app"{% endif %}>Save and reload app</button></div>
             </form>
         </div>
     </div>
@@ -142,6 +144,7 @@
     </script>
 
     <style>
+        @media (max-width: 600px) { .form-grid { grid-template-columns: 1fr !important; } .form-actions { grid-column: 1 / -1 !important; } }
         .form-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;

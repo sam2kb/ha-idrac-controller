@@ -624,3 +624,59 @@ def test_worker_reads_total_power_with_unfamiliar_sdr_labels(make_worker):
     assert main.ALL_SERVERS_STATUS[item.alias]["power_capacity_watts"] == 900
     item.ipmi.apply_dell_fan_control_profile.assert_not_called()
     item.ipmi.apply_user_fan_control_profile.assert_not_called()
+
+
+def test_all_available_extra_readings_publish_and_failures_clear_availability(make_worker):
+    import json
+    item = make_worker(fan_control_enabled=False)
+    rows = "DIMM Temp | 20h | ok | 32.1 | 40 degrees C\nPS1 Voltage | 21h | ok | 10.1 | 0 Volts\nPS1 Current | 22h | ok | 10.1 | 0.1 Amps\nPS1 Status | 23h | ok | 10.1 | Power Supply AC lost\nUnused | 24h | ns | 7.1 | No Reading"
+    item._initialize()
+    del item._publish_mqtt_data
+    item.mqtt.is_connected = True
+    readings = item._additional_readings(rows)
+    item._update_status({"cpu_temps": [35]}, [], 70, [], "Monitor only", readings=readings)
+    payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+    topic = "homeassistant/sensor/idrac_controller_fixture_ipmi_21_10_1/config"
+    config = json.loads(payloads[topic])
+    assert config["device_class"] == "voltage"
+    assert config["expire_after"] == 180
+    assert config["unit_of_measurement"] == "V"
+    assert config["json_attributes_topic"] == f"{item.mqtt.base_topic}/sensor/ipmi_21_10_1"
+    state = json.loads(payloads[config["state_topic"]])
+    assert state["state"] == 0
+    assert state["attributes"] == {"ipmi_status": "ok", "entity": "10.1", "sensor_number": "0x21", "source": "IPMI SDR"}
+    assert not any("ipmi_24_" in topic for topic in payloads)
+    item.mqtt.publish.reset_mock()
+    item._update_status({"cpu_temps": [35]}, [], 70, [], "Monitor only")
+    payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+    for reading in readings:
+        assert payloads[f"{item.mqtt.base_topic}/reading/{reading['slug']}/availability"] == "offline"
+        assert f"{item.mqtt.base_topic}/sensor/{reading['slug']}" not in payloads
+    item.mqtt.publish.reset_mock()
+    item._on_mqtt_connected()
+    item.mqtt.publish.assert_any_call(f"{item.mqtt.base_topic}/reading/ipmi_21_10_1/availability", "offline", retain=True)
+
+
+def test_additional_discovery_reuses_core_readings_and_only_exposes_decoded_oem_fields(make_worker):
+    item = make_worker()
+    data = "CPU1 Temp | 01h | ok | 3.1 | 35 degrees C\nInlet Temp | 02h | ok | 7.1 | 24 degrees C\nFan1 | 03h | ok | 7.1 | 1440 RPM\nPwr Consumption | 77h | ok | 7.1 | 70 Watts\nDIMM Temp | 20h | ok | 32.1 | 40 degrees C"
+    assert [reading["name"] for reading in item._additional_readings(data)] == ["DIMM Temp"]
+    item._power_details = {"instantaneous_watts": 83, "current_amps": 0.7, "headroom_watts": 817, "peak_headroom_watts": 800}
+    assert len(item._additional_readings(data)) == 5
+    item._power_details = {}
+    assert len(item._additional_readings(data)) == 1
+
+
+def test_long_discrete_readings_preserve_full_text_in_attributes(make_worker):
+    import json
+    item = make_worker()
+    item._initialize()
+    del item._publish_mqtt_data
+    item.mqtt.is_connected = True
+    text = "Asserted condition, " * 20
+    readings = item._additional_readings(f"Status | 21h | ok | 7.1 | {text}")
+    item._update_status({"cpu_temps": [35]}, [], 70, [], "Monitor only", readings=readings)
+    payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+    state = json.loads(payloads[f"{item.mqtt.base_topic}/sensor/ipmi_21_7_1"])
+    assert len(state["state"]) == 255
+    assert state["attributes"]["full_reading"] == text.strip()

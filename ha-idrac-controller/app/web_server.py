@@ -1,7 +1,6 @@
 # HA-iDRAC/ha-idrac-controller/app/web_server.py
-from flask import Flask, render_template, request, redirect, flash
+from flask import Flask, render_template, request, redirect, flash, session, jsonify
 from waitress import serve
-from markupsafe import Markup
 
 from .fan_logic import FAN_MODES, validate_fan_curve
 from .power_control import POWER_ACTIONS
@@ -11,6 +10,9 @@ import re
 import json
 import logging
 import threading
+import secrets
+import tempfile
+from contextlib import suppress
 
 log = logging.getLogger('werkzeug')
 app = Flask(__name__)
@@ -23,6 +25,9 @@ status_lock = None
 config_lock = threading.Lock()
 global_config = {}
 health_check = None
+BOOT_ID = secrets.token_hex(16)
+restart_lock = threading.Lock()
+restart_state = "idle"
 
 
 # --- Helper functions ---
@@ -61,51 +66,91 @@ def load_servers_config():
             return []
 
 
-def _app_info_url():
-    """Find this installation's app page without hardcoding a repository hash."""
-    fallback = "/config/apps"
-    token = os.environ.get("SUPERVISOR_TOKEN")
-    if not token:
-        return fallback
-    connection = HTTPConnection("supervisor", timeout=3)
-    try:
-        connection.request("GET", "/addons/self/info",
-                           headers={"Authorization": f"Bearer {token}"})
-        response = connection.getresponse()
-        if response.status != 200:
-            return fallback
-        payload = json.loads(response.read(65536))
-        if not isinstance(payload, dict) or payload.get("result") != "ok":
-            return fallback
-        data = payload.get("data")
-        slug = data.get("slug") if isinstance(data, dict) else None
-        if isinstance(slug, str) and re.fullmatch(r"[a-z0-9_]+", slug):
-            return f"/config/app/{slug}/info"
-    except (OSError, HTTPException, ValueError, TypeError):
-        # Metadata is optional. Never log tokens, response bodies or errors.
-        pass
-    finally:
-        connection.close()
-    return fallback
-
-
 def save_servers_config(servers):
+    """Replace the complete saved configuration before offering a reload."""
+    temporary = None
     with config_lock:
         try:
-            with open(SERVERS_CONFIG_FILE, 'w') as f:
-                json.dump(servers, f, indent=4)
-        except IOError:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=os.path.dirname(SERVERS_CONFIG_FILE),
+                                             prefix=".servers-", delete=False) as stream:
+                temporary = stream.name
+                os.chmod(temporary, 0o600)
+                json.dump(servers, stream, indent=4)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, SERVERS_CONFIG_FILE)
+        except OSError:
             flash("Error: Could not write to config file.", "error")
             return False
-
-    restart_url = _app_info_url()
-    label = "Open HA iDRAC Controller" if restart_url.startswith("/config/app/") else "Open Home Assistant Apps"
-    message = Markup(
-        'Configuration saved. <a href="{}" target="_top">{}</a> '
-        'and restart the app to apply changes.'
-    ).format(restart_url, label)
-    flash(message, "success")
+        finally:
+            if temporary:
+                with suppress(OSError):
+                    os.unlink(temporary)
     return True
+
+
+def _save_response(servers, parent):
+    if save_servers_config(servers):
+        if request.form.get("action") == "save_reload" and os.environ.get("SUPERVISOR_TOKEN"):
+            session["reload_token"] = secrets.token_urlsafe(32)
+            return redirect(parent + "app/reload")
+        flash("Configuration saved. Reload or restart the app to apply changes.", "success")
+    return redirect(parent + "servers")
+
+
+def _restart_app():
+    """Ask Supervisor to restart only this app; normal SIGTERM cleanup applies."""
+    global restart_state
+    connection = HTTPConnection("supervisor", timeout=65)
+    try:
+        token = os.environ.get("SUPERVISOR_TOKEN")
+        if not token:
+            raise ValueError
+        connection.request("POST", "/addons/self/restart", headers={"Authorization": f"Bearer {token}"})
+        response = connection.getresponse()
+        payload = json.loads(response.read(65536)) if response.status == 200 else None
+        if not isinstance(payload, dict) or payload.get("result") != "ok":
+            raise ValueError
+    except (OSError, HTTPException, ValueError, TypeError):
+        with restart_lock:
+            restart_state = "failed"
+        log.warning("App restart request failed. Saved configuration is unchanged.")
+    finally:
+        connection.close()
+
+
+@app.route("/app/reload", methods=["GET", "POST"])
+def reload_app():
+    global restart_state
+    if request.method == "GET":
+        if not session.get("reload_token"):
+            return redirect("../servers")
+        response = app.make_response(render_template("reload.html", boot_id=BOOT_ID, reload_token=session["reload_token"]))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    expected = session.get("reload_token")
+    supplied = request.headers.get("X-Reload-Token", "")
+    if not isinstance(expected, str) or not secrets.compare_digest(expected.encode("utf-8"), supplied.encode("utf-8")):
+        return jsonify(error="Reload request expired. Save your changes again."), 403
+    if not os.environ.get("SUPERVISOR_TOKEN"):
+        return jsonify(error="App reload requires Home Assistant Supervisor. Your configuration is saved."), 503
+    with restart_lock:
+        if restart_state == "restarting":
+            return jsonify(error="The app is already reloading."), 409
+        session.pop("reload_token", None)
+        restart_state = "restarting"
+        # The browser receives its response before the Supervisor stops us.
+        timer = threading.Timer(0.5, _restart_app)
+        timer.daemon = True
+        timer.start()
+    return jsonify(state="restarting"), 202
+
+
+@app.route("/app/status")
+def app_status():
+    response = jsonify(boot_id=BOOT_ID, state=restart_state)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def load_all_servers_status():
@@ -140,7 +185,7 @@ def index():
 @app.route('/servers')
 def manage_servers():
     servers = load_servers_config()
-    return render_template('servers.html', servers=servers, defaults=global_config, power_actions=POWER_ACTIONS)
+    return render_template('servers.html', servers=servers, defaults=global_config, power_actions=POWER_ACTIONS, can_reload=bool(os.environ.get("SUPERVISOR_TOKEN")))
 
 
 @app.route('/servers/add', methods=['POST'])
@@ -182,8 +227,7 @@ def add_server():
     for action in POWER_ACTIONS.values():
         new_server[action["option"]] = request.form.get(action["option"]) == "true"
     servers.append(new_server)
-    save_servers_config(servers)
-    return redirect('../servers')
+    return _save_response(servers, "../")
 
 
 @app.route('/servers/edit/<alias>')
@@ -197,7 +241,7 @@ def edit_server_form(alias):
         server_to_edit.setdefault('target_temp', 55)
         server_to_edit.setdefault('fan_control_enabled', True)
         server_to_edit.setdefault('disable_pcie_cooling_response', False)
-        return render_template('edit_server.html', server=server_to_edit, power_actions=POWER_ACTIONS)
+        return render_template('edit_server.html', server=server_to_edit, power_actions=POWER_ACTIONS, can_reload=bool(os.environ.get("SUPERVISOR_TOKEN")))
     flash(f"Server '{alias}' not found.", "error")
     return redirect('../../servers')
 
@@ -250,8 +294,7 @@ def update_server(alias):
 
     server_to_update['fan_curve'] = fan_curve
 
-    save_servers_config(servers)
-    return redirect('../../servers')
+    return _save_response(servers, "../../")
 
 
 @app.route('/servers/delete/<alias>', methods=['POST'])
@@ -259,7 +302,8 @@ def delete_server(alias):
     servers = load_servers_config()
     servers_to_keep = [s for s in servers if s['alias'] != alias]
     if len(servers_to_keep) < len(servers):
-        save_servers_config(servers_to_keep)
+        if save_servers_config(servers_to_keep):
+            flash("Configuration saved. Reload or restart the app to apply changes.", "success")
     else:
         flash(f"Server '{alias}' not found.", "error")
     return redirect('../../servers')

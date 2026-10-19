@@ -23,6 +23,7 @@ def web(monkeypatch, tmp_path):
         "base_fan_speed_percent": 20, "low_temp_threshold": 45,
         "high_temp_fan_speed_percent": 50, "critical_temp_threshold": 65,
     })
+    monkeypatch.setattr(web_server, "restart_state", "idle")
     monkeypatch.setitem(web_server.app.config, "TESTING", True)
     return web_server.app.test_client(), config_path
 
@@ -187,74 +188,120 @@ def restart_links(response):
 
 
 @pytest.mark.parametrize("prefix", ["", "/api/hassio_ingress/fixture"])
-@pytest.mark.parametrize("slug", ["a85f1537_ha_idrac_controller", "local_ha_idrac_controller", "otherrepo_ha_idrac_controller"])
-def test_saved_message_links_to_installed_app_info_outside_ingress(supervisor_self, prefix, slug):
+def test_regular_save_has_no_restart_link_or_supervisor_request(supervisor_self, prefix):
     client, config_path, factory, connection, response = supervisor_self
-    response.read.return_value = json.dumps({"result": "ok", "data": {"slug": slug}}).encode()
-    client.post("/servers/add", data={"alias": "link-fixture"},
-                environ_overrides={"SCRIPT_NAME": prefix})
+    client.post("/servers/add", data={"alias": "save-fixture"}, environ_overrides={"SCRIPT_NAME": prefix})
     page = client.get("/servers", environ_overrides={"SCRIPT_NAME": prefix})
-    links = restart_links(page)
-    assert links == [{"href": f"/config/app/{slug}/info", "target": "_top"}]
-    assert urljoin("https://ha.bit-b.com" + prefix + "/servers", links[0]["href"]) == (
-        f"https://ha.bit-b.com/config/app/{slug}/info")
-    factory.assert_called_once_with("supervisor", timeout=3)
-    connection.request.assert_called_once_with(
-        "GET", "/addons/self/info", headers={"Authorization": "Bearer fixture-supervisor-token"})
-    connection.close.assert_called_once()
+    assert b"Configuration saved. Reload or restart the app to apply changes." in page.data
+    assert restart_links(page) == []
+    factory.assert_not_called()
     assert "fixture-supervisor-token" not in page.get_data(as_text=True)
     assert "fixture-supervisor-token" not in config_path.read_text()
 
 
-def test_missing_supervisor_token_links_to_current_apps_page(supervisor_self, monkeypatch):
+@pytest.mark.parametrize("prefix", ["", "/api/hassio_ingress/phone"])
+@pytest.mark.parametrize("path", ["/servers/add", "/servers/update/fixture"])
+def test_save_reload_stays_in_ingress_and_starts_only_after_page_loaded(supervisor_self, monkeypatch, prefix, path):
+    from unittest.mock import Mock
     client, config_path, factory, connection, response = supervisor_self
-    monkeypatch.delenv("SUPERVISOR_TOKEN")
-    client.post("/servers/add", data={"alias": "link-fixture"})
-    assert restart_links(client.get("/servers")) == [{"href": "/config/apps", "target": "_top"}]
+    timer = Mock()
+    monkeypatch.setattr(web_server.threading, "Timer", timer)
+    result = client.post(path, data={"alias": "new", "fan_mode": "auto", "action": "save_reload"},
+                         environ_overrides={"SCRIPT_NAME": prefix})
+    destination = urljoin(f"https://ha.example{prefix}{path}", result.headers["Location"])
+    assert destination == f"https://ha.example{prefix}/app/reload"
+    page = client.get("/app/reload", environ_overrides={"SCRIPT_NAME": prefix})
+    assert page.status_code == 200
+    assert b"Configuration saved" in page.data
+    assert b"fixture-supervisor-token" not in page.data
+    timer.assert_not_called()
+    with client.session_transaction() as state:
+        token = state["reload_token"]
+    result = client.post("/app/reload", headers={"X-Reload-Token": token})
+    assert result.status_code == 202
+    timer.assert_called_once_with(0.5, web_server._restart_app)
+    assert timer.return_value.daemon is True
+    timer.return_value.start.assert_called_once()
     factory.assert_not_called()
+    assert client.post("/app/reload", headers={"X-Reload-Token": token}).status_code == 403
 
 
-@pytest.mark.parametrize("body", [
-    b"not json", b"[]", b'{"result":"error"}', b'{"result":"ok","data":[]}',
-    b'{"result":"ok","data":{}}',
-    json.dumps({"result": "ok", "data": {"slug": "../other"}}).encode(),
-    json.dumps({"result": "ok", "data": {"slug": "bad<script>alert(1)</script>"}}).encode(),
-    json.dumps({"result": "ok", "data": {"slug": None}}).encode(),
-])
-def test_bad_self_metadata_falls_back_without_breaking_save(supervisor_self, body):
+def test_restart_uses_only_supervisor_self_endpoint(supervisor_self):
     client, config_path, factory, connection, response = supervisor_self
-    response.read.return_value = body
-    client.post("/servers/add", data={"alias": "link-fixture"})
-    assert any(server["alias"] == "link-fixture" for server in json.loads(config_path.read_text()))
-    assert restart_links(client.get("/servers")) == [{"href": "/config/apps", "target": "_top"}]
+    web_server._restart_app()
+    factory.assert_called_once_with("supervisor", timeout=65)
+    connection.request.assert_called_once_with("POST", "/addons/self/restart",
+                                             headers={"Authorization": "Bearer fixture-supervisor-token"})
     connection.close.assert_called_once()
 
 
-@pytest.mark.parametrize("status", [302, 401, 404, 503])
-def test_unavailable_self_metadata_falls_back(supervisor_self, status):
+@pytest.mark.parametrize("failure", ["denied", "bad-json", "error-result", "timeout"])
+def test_restart_failure_is_visible_without_leaking_details(supervisor_self, failure, caplog):
     client, config_path, factory, connection, response = supervisor_self
-    response.status = status
-    client.post("/servers/add", data={"alias": "link-fixture"})
-    assert restart_links(client.get("/servers")) == [{"href": "/config/apps", "target": "_top"}]
-    response.read.assert_not_called()
-    connection.request.assert_called_once()
+    if failure == "denied":
+        response.status = 403
+    elif failure == "bad-json":
+        response.read.return_value = b"fixture-supervisor-token"
+    elif failure == "error-result":
+        response.read.return_value = b'{"result":"error"}'
+    else:
+        connection.request.side_effect = TimeoutError("fixture-supervisor-token")
+    web_server._restart_app()
+    status = client.get("/app/status")
+    assert status.json["state"] == "failed"
+    assert status.headers["Cache-Control"] == "no-store"
+    assert b"fixture-supervisor-token" not in status.data
+    assert "fixture-supervisor-token" not in caplog.text
+    connection.close.assert_called_once()
 
 
-def test_metadata_timeout_does_not_break_configuration_save(supervisor_self):
+@pytest.mark.parametrize("supplied", [None, "incorrect", "é"])
+def test_restart_rejects_missing_wrong_and_non_ascii_tokens(supervisor_self, supplied):
     client, config_path, factory, connection, response = supervisor_self
-    connection.request.side_effect = TimeoutError("fixture-secret-detail")
-    client.post("/servers/add", data={"alias": "link-fixture"})
-    page = client.get("/servers")
-    assert restart_links(page) == [{"href": "/config/apps", "target": "_top"}]
-    assert "fixture-secret-detail" not in page.get_data(as_text=True)
+    with client.session_transaction() as state:
+        state["reload_token"] = "expected"
+    headers = {"X-Reload-Token": supplied} if supplied else {}
+    assert client.post("/app/reload", headers=headers).status_code == 403
+    factory.assert_not_called()
 
 
-def test_failed_save_does_not_offer_restart_link_or_query_metadata(supervisor_self, monkeypatch):
+def test_restart_unavailable_without_supervisor_does_not_restart(web, monkeypatch):
+    from unittest.mock import Mock
+    client, config_path = web
+    timer = Mock()
+    monkeypatch.setattr(web_server.threading, "Timer", timer)
+    with client.session_transaction() as state:
+        state["reload_token"] = "expected"
+    assert client.post("/app/reload", headers={"X-Reload-Token": "expected"}).status_code == 503
+    timer.assert_not_called()
+    assert b'disabled title="Available when running as a Home Assistant app"' in client.get("/servers").data
+
+
+def test_duplicate_reload_request_does_not_schedule_second_restart(supervisor_self, monkeypatch):
+    from unittest.mock import Mock
     client, config_path, factory, connection, response = supervisor_self
-    monkeypatch.setattr(web_server, "SERVERS_CONFIG_FILE", str(config_path.parent))
-    client.post("/servers/add", data={"alias": "link-fixture"})
+    monkeypatch.setattr(web_server, "restart_state", "restarting")
+    timer = Mock()
+    monkeypatch.setattr(web_server.threading, "Timer", timer)
+    with client.session_transaction() as state:
+        state["reload_token"] = "expected"
+    assert client.post("/app/reload", headers={"X-Reload-Token": "expected"}).status_code == 409
+    timer.assert_not_called()
+
+
+def test_failed_atomic_save_keeps_old_config_and_never_restarts(supervisor_self, monkeypatch):
+    client, config_path, factory, connection, response = supervisor_self
+    before = config_path.read_bytes()
+    def fail(*args):
+        raise OSError("fixture-secret-detail")
+    monkeypatch.setattr(web_server.os, "replace", fail)
+    result = client.post("/servers/add", data={"alias": "new", "action": "save_reload"})
+    assert result.headers["Location"] == "../servers"
     page = client.get("/servers")
     assert b"Could not write" in page.data
+    assert config_path.read_bytes() == before
+    assert not list(config_path.parent.glob(".servers-*"))
+    assert b"fixture-secret-detail" not in page.data
     assert restart_links(page) == []
     factory.assert_not_called()
 
@@ -330,3 +377,22 @@ def test_dashboard_labels_cpu_sockets_and_shows_reported_battery_health(web, mon
     assert "7.78% Capacity" in text
     assert "System Board Intrusion" in text and "Clear" in text
     assert "Warning Threshold" in text and "896" in text
+
+
+def test_dashboard_shows_available_additional_readings_and_escapes_labels(web, monkeypatch):
+    client, config_path = web
+    monkeypatch.setattr(web_server, "load_all_servers_status", lambda: [{
+        "alias": "fixture", "ip": "127.0.0.1", "last_updated": "fixture",
+        "hottest_cpu_temp_c": None, "inlet_temp_c": None, "exhaust_temp_c": None,
+        "power_consumption_watts": None, "cpu_temps_c": [], "actual_fan_rpms": [],
+        "sensor_readings": [
+            {"name": "PS1 Voltage <test>", "value": 0, "unit": "V", "status": "ok"},
+            {"name": "PS1 Status", "value": "AC lost", "unit": None, "status": "ok"},
+            {"name": "Hidden absent reading", "value": None, "unit": "V", "status": "ns"},
+        ],
+    }])
+    page = client.get("/")
+    assert page.status_code == 200
+    assert b"PS1 Voltage &lt;test&gt;" in page.data and b"0 V" in page.data
+    assert b"AC lost" in page.data
+    assert b"Hidden absent reading" not in page.data

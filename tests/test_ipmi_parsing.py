@@ -255,7 +255,7 @@ def test_optional_power_queries_use_discovered_sensor_and_read_only_headroom(mon
     ]
     assert manager.parse_power_details(raw) == {
         "reading_watts": 70, "warning_watts": 896, "failure_watts": 980,
-        "instantaneous_watts": 83, "headroom_watts": 817, "capacity_watts": 900,
+        "instantaneous_watts": 83, "headroom_watts": 817, "peak_headroom_watts": 800, "current_amps": 0.7, "capacity_watts": 900,
     }
 
 
@@ -275,7 +275,7 @@ def test_partial_power_results_survive_independent_query_failure(monkeypatch):
     values = manager.parse_power_details(manager.retrieve_power_details_raw("Pwr Consumption"))
     assert values == {"warning_watts": 896, "failure_watts": 980}
     run.side_effect = [None, None, "3e 03 20 03"]
-    assert manager.parse_power_details(manager.retrieve_power_details_raw("System Level")) == {"headroom_watts": 830}
+    assert manager.parse_power_details(manager.retrieve_power_details_raw("System Level")) == {"headroom_watts": 830, "peak_headroom_watts": 800}
     run.reset_mock()
     assert manager.retrieve_power_details_raw("invalid\nname") is None
     run.assert_not_called()
@@ -385,9 +385,11 @@ def test_oem_power_lengths_and_partial_support_are_independent(monkeypatch):
     for raw in (None, "", "bad", "53 00", "53 00 00 00 00 00", "ff ff 00 00 00 00 00"):
         monkeypatch.setattr(manager, "_run_ipmi_command", Mock(side_effect=[None, raw, "31 03 20 03"]))
         values = manager.parse_power_details(manager.retrieve_power_details_raw("Total Draw"))
-        assert values == {"headroom_watts": 817}
+        assert values["headroom_watts"] == 817
+        assert values["peak_headroom_watts"] == 800
+        assert "instantaneous_watts" not in values and "capacity_watts" not in values
     monkeypatch.setattr(manager, "_run_ipmi_command", Mock(side_effect=[None, "53 00 07 00 00 00 00", None]))
-    assert manager.parse_power_details(manager.retrieve_power_details_raw("System Level")) == {"instantaneous_watts": 83}
+    assert manager.parse_power_details(manager.retrieve_power_details_raw("System Level")) == {"instantaneous_watts": 83, "current_amps": 0.7}
     assert "capacity_watts" not in manager.parse_power_details("Reading: 70 W\nSystem Instantaneous Headroom: 817 W")
 
 
@@ -427,6 +429,6 @@ def test_dell_total_power_and_headroom_do_not_depend_on_sensor_labels(monkeypatc
     run = Mock(side_effect=["53 00 07 00 00 00 00", "31 03 20 03"])
     monkeypatch.setattr(manager, "_run_ipmi_command", run)
     values = manager.parse_power_details(manager.retrieve_power_details_raw(None))
-    assert values == {"instantaneous_watts": 83, "headroom_watts": 817, "capacity_watts": 900}
+    assert values == {"instantaneous_watts": 83, "headroom_watts": 817, "peak_headroom_watts": 800, "current_amps": 0.7, "capacity_watts": 900}
     assert run.call_args_list == [call(["0x30", "0xb3", "0x0a", "0x00"], timeout=3),
                                  call(["0x30", "0xbb"], timeout=3)]
