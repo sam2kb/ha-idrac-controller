@@ -1,3 +1,9 @@
+## 1.0.1 - 2026-10-19
+
+- Move the app image to Python 3.14, the version current Home Assistant runs
+  on. Flask moves to 3.1.3 for Python 3.14 support.
+- No behaviour changes.
+
 ## 1.0.0 - 2026-10-19
 
 First release.

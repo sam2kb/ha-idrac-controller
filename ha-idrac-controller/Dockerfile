@@ -1,6 +1,6 @@
 # HA iDRAC Controller/Dockerfile
-# Use an official Python slim image based on Debian Bookworm
-FROM python:3.11-slim-bookworm
+# Use the current Home Assistant Python on Debian Trixie
+FROM python:3.14-slim-trixie
 
 ENV PYTHONUNBUFFERED=1
 
