@@ -209,3 +209,84 @@ def test_tls_configuration_failure_does_not_stop_ipmi(make_worker, monkeypatch):
     item.ipmi.retrieve_temperatures_raw.assert_called_once()
     item.mqtt.connect.assert_not_called()
     assert "fixture-private-detail" not in str(item._log.call_args_list)
+
+
+@pytest.mark.parametrize("mode", ["auto", None, "unsupported"])
+@pytest.mark.parametrize("temperature_data", [CPU_COOL, CPU_HOT, "", None])
+def test_dell_auto_never_applies_custom_speeds_or_thresholds(make_worker, mode, temperature_data):
+    item = make_worker(fan_mode=mode, base_fan_speed_percent=100,
+                       low_temp_threshold=0, high_temp_fan_speed_percent=100,
+                       critical_temp_threshold=0)
+    item.ipmi.retrieve_temperatures_raw.return_value = temperature_data
+    run_cycles(item)
+    item.ipmi.apply_user_fan_control_profile.assert_not_called()
+    item.ipmi.apply_dell_fan_control_profile.assert_called_once()
+    assert main.ALL_SERVERS_STATUS[item.alias]["target_fan_speed_percent"].startswith("Dell Auto")
+
+
+def test_missing_cooling_mode_defaults_to_auto(make_worker):
+    item = make_worker()
+    del item.config["fan_mode"]
+    item = main.ServerWorker(item.config, item.global_opts)
+    item.ipmi.retrieve_temperatures_raw = Mock(return_value=CPU_COOL)
+    item.ipmi.retrieve_fan_rpms_raw = Mock(return_value="")
+    item.ipmi.retrieve_power_sdr_raw = Mock(return_value="")
+    item.ipmi.apply_dell_fan_control_profile = Mock(return_value="")
+    item.ipmi.apply_user_fan_control_profile = Mock()
+    item._publish_mqtt_data = Mock()
+    run_cycles(item)
+    item.ipmi.apply_dell_fan_control_profile.assert_called_once()
+    item.ipmi.apply_user_fan_control_profile.assert_not_called()
+
+
+def test_auto_handback_happens_before_slow_initialization_and_leaves_pcie_setting(make_worker):
+    item = make_worker(fan_mode="auto", disable_pcie_cooling_response=True)
+    events = []
+    item.ipmi.apply_dell_fan_control_profile.side_effect = lambda: events.append("auto") or ""
+    item.ipmi.get_server_model_info.side_effect = lambda: events.append("fru") or {}
+    item.ipmi.get_firmware_version.side_effect = lambda: events.append("firmware")
+    item.ipmi.set_third_party_pcie_cooling_response = Mock()
+    item._initialize()
+    assert events == ["auto", "fru", "firmware"]
+    item.ipmi.set_third_party_pcie_cooling_response.assert_not_called()
+    item.ipmi.apply_user_fan_control_profile.assert_not_called()
+
+
+def test_monitor_only_auto_mode_is_read_only_including_startup_and_cleanup(make_worker):
+    item = make_worker(fan_mode="auto", fan_control_enabled=False,
+                       disable_pcie_cooling_response=True)
+    item.ipmi.set_third_party_pcie_cooling_response = Mock()
+    item._sleep = lambda _: item.stop()
+    item.run()
+    item.ipmi.apply_dell_fan_control_profile.assert_not_called()
+    item.ipmi.apply_user_fan_control_profile.assert_not_called()
+    item.ipmi.set_third_party_pcie_cooling_response.assert_not_called()
+
+
+def test_auto_handback_failure_reports_unknown_and_retries(make_worker):
+    item = make_worker(fan_mode="auto")
+    item.ipmi.apply_dell_fan_control_profile.side_effect = [None, ""]
+    states = []
+
+    def sleep(_):
+        states.append(main.ALL_SERVERS_STATUS[item.alias]["target_fan_speed_percent"])
+        if len(states) == 2:
+            item.stop()
+    item._sleep = sleep
+    item._run_loop()
+    assert states == ["Unknown (Dell auto hand-back failed)", "Dell Auto"]
+    item.ipmi.apply_user_fan_control_profile.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", ["simple", "curve", "target"])
+def test_existing_explicit_custom_modes_remain_active(make_worker, mode):
+    item = make_worker(fan_mode=mode, fan_curve=[
+        {"temp": 20, "speed": 20}, {"temp": 60, "speed": 60},
+    ])
+    item._initialize()
+    # Ensure elapsed time even on Windows clocks with coarse resolution.
+    item.pid.last_time -= 1
+    run_cycles(item)
+    item.ipmi.apply_user_fan_control_profile.assert_called_once()
+    item.ipmi.apply_dell_fan_control_profile.assert_not_called()
+    assert item.config["fan_mode"] == mode

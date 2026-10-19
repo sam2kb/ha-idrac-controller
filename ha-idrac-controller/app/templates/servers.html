@@ -40,12 +40,21 @@
                     <input type="password" id="idrac_password" name="idrac_password" required>
                 </div>
                 <div class="form-group">
-                    <label for="fan_control_enabled">Fan Control</label>
+                    <label for="fan_control_enabled">Cooling Control</label>
                     <select id="fan_control_enabled" name="fan_control_enabled">
-                        <option value="true" selected>Enabled</option>
-                        <option value="false">Disabled (Monitor Only)</option>
+                        <option value="true" selected>Apply selected mode</option>
+                        <option value="false">Monitor only (leave settings untouched)</option>
                     </select>
                 </div>
+                <div class="form-group">
+                    <label for="fan_mode">Cooling Mode</label>
+                    <select id="fan_mode" name="fan_mode" onchange="updateCoolingMode()">
+                        <option value="auto" selected>Dell automatic (recommended)</option>
+                        <option value="simple">Custom thresholds</option>
+                    </select>
+                    <small>Dell automatic uses the server's cooling controller.</small>
+                </div>
+                <div id="custom-fan-defaults" class="form-grid" style="display: none; grid-column: 1 / -1;">
                 <div class="form-group">
                     <label for="disable_pcie_cooling_response">Third-party PCIe cooling</label>
                     <select id="disable_pcie_cooling_response" name="disable_pcie_cooling_response">
@@ -66,8 +75,9 @@
                     <input type="number" id="high_temp_fan_speed_percent" name="high_temp_fan_speed_percent" value="{{ defaults.high_temp_fan_speed_percent }}" min="5" max="100">
                 </div>
                  <div class="form-group">
-                    <label for="critical_temp_threshold">Critical Temp Threshold (°C)</label>
+                    <label for="critical_temp_threshold">Return to Dell Auto at CPU Temp (°C)</label>
                     <input type="number" id="critical_temp_threshold" name="critical_temp_threshold" value="{{ defaults.critical_temp_threshold }}" min="0" max="100">
+                </div>
                 </div>
                 <div class="form-actions">
                     <button type="submit">Add Server</button>
@@ -110,6 +120,13 @@
             </table>
         </div>
     </div>
+    <script>
+        function updateCoolingMode() {
+            const custom = document.getElementById('fan_mode').value !== 'auto';
+            document.getElementById('custom-fan-defaults').style.display = custom ? 'grid' : 'none';
+        }
+        document.addEventListener('DOMContentLoaded', updateCoolingMode);
+    </script>
     <style>
         .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1em; }
         .form-group { display: flex; flex-direction: column; }

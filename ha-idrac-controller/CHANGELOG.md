@@ -1,3 +1,13 @@
+## 1.0.6 - 2026-10-18
+
+- Default new servers to Dell automatic cooling. Hand control to the iDRAC
+  before startup lookups and on each poll, without applying a custom fan curve.
+- Keep existing saved custom modes and the separate, read-only monitor mode.
+- Make custom cooling an explicit per-server choice and hide unused controls
+  in automatic mode. Clarify the return-to-Dell temperature label.
+- Ignore custom PCIe cooling overrides in Dell automatic mode and report
+  failed hand-back attempts without claiming automatic control succeeded.
+
 ## 1.0.5 - 2026-10-19
 
 - Read the MQTT broker address, port and service credentials automatically from

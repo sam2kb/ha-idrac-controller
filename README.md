@@ -17,8 +17,9 @@ IPMI processor entity (`3.x`), so both the 12G `Temp` naming and the 13G
 `PSn PG Fail`, and inlet and exhaust sensors are matched at the start of the
 name so a PSU inlet reading cannot replace the chassis inlet.
 
-Fan control has three per-server modes: simple thresholds, a temperature curve,
-and a target-temperature PID loop. A 2 °C hysteresis band keeps the fans from
+New servers use Dell automatic cooling by default. Custom control is optional:
+choose simple thresholds, a temperature curve, or a target-temperature PID loop
+for each server. Existing saved custom modes keep their settings. A 2 °C hysteresis band keeps the fans from
 flapping between speeds, and requests below 5% are clamped to 5%. If manual
 mode is enabled but the speed write fails, the fans go back to Dell auto. A
 server that refuses fan control with `0xc1`, `0xd4` or `0xd5` (iDRAC 9 or 10, or
@@ -67,10 +68,19 @@ servers and a Manage Servers page for adding, editing and deleting them.
 
 ## Fan control notes
 
-Fan values are percentages of the iDRAC's maximum fan speed, not RPM. Start with
-`base_fan_speed_percent: 20`, `low_temp_threshold: 45`,
-`high_temp_fan_speed_percent: 50` and `critical_temp_threshold: 65`, then watch
-the temperatures for a day before lowering anything.
+Dell automatic mode hands cooling to the iDRAC at startup and on each poll.
+Custom speed and temperature settings are ignored in this mode. Monitor-only
+mode is separate and leaves the current iDRAC cooling settings untouched.
+
+For custom modes, fan values are percentages of maximum fan speed, not RPM.
+The app defaults are `base_fan_speed_percent: 20`,
+`low_temp_threshold: 45`, `high_temp_fan_speed_percent: 50`
+and `critical_temp_threshold: 65`. Check CPU temperatures alongside disk,
+memory and adapter temperatures when choosing a custom profile.
+
+The critical_temp_threshold option is the app's temperature for returning to
+Dell automatic cooling. It is not the processor's hardware critical limit.
+The polling interval is also an app setting; it does not come from iDRAC.
 
 The account needs Administrator privilege. A lower account gets the fan commands
 refused with `0xd4`, and the app switches to monitoring only.
@@ -79,8 +89,9 @@ The app stores servers in `/data/servers_config.json`, which is private to the
 app, with the iDRAC password in plain text. Do not reuse an administrator
 password from another system.
 
-When the app stops, it hands the fans back to Dell's automatic profile. If the
-container is killed without running its shutdown handler, the iDRAC can stay in
+When cooling control is enabled and the app stops, it hands the fans back to
+Dell's automatic profile. If the container is killed without running its
+shutdown handler, the iDRAC can stay in
 manual mode at the last speed. The Supervisor watchdog restarts the app in that
 case, and the configured profile is applied again.
 
@@ -88,7 +99,7 @@ case, and the configured profile is applied again.
 
 - The third-party PCIe cooling command is a Dell OEM command for 12G and 13G.
   Some firmware does not accept it; the app logs that once and leaves the
-  setting untouched. It only runs when fan control is enabled.
+  setting untouched. It only runs in an enabled custom cooling mode.
 - iDRAC 9 (14G) and newer are outside the scope of this app.
 - The temperature parsing is covered by unit tests and a fake-IPMI run. It has
   not been tested on every PowerEdge model, so watch the first start on new

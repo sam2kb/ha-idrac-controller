@@ -5,6 +5,9 @@ Kept separate from main.py so the threshold/hysteresis behaviour can be unit
 tested without importing Flask, paho-mqtt or an IPMI connection.
 """
 
+CUSTOM_FAN_MODES = frozenset({"simple", "curve", "target"})
+FAN_MODES = CUSTOM_FAN_MODES | {"auto"}
+
 MIN_FAN_PERCENT = 5
 DEFAULT_HYSTERESIS_C = 2.0
 

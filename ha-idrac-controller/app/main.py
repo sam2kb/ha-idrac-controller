@@ -6,7 +6,7 @@ import signal
 import threading
 import time
 
-from .fan_logic import SimpleFanState, clamp_speed, validate_fan_config, validate_fan_curve
+from .fan_logic import CUSTOM_FAN_MODES, SimpleFanState, clamp_speed, validate_fan_config, validate_fan_curve
 from .ipmi_manager import IPMIManager
 from .mqtt_client import MqttClient
 from .mqtt_config import resolve_mqtt_config
@@ -51,6 +51,7 @@ class ServerWorker:
         self.mqtt = MqttClient(client_id=f"ha_idrac_{self.alias}")
         self.pid = PIDController()
         self.fan_state = SimpleFanState()
+        self.fan_mode = self.config.get('fan_mode', 'auto')
 
         self.server_info = {}
         self.discovered_sensors = set()
@@ -84,6 +85,9 @@ class ServerWorker:
 
     def _initialize(self):
         self._log("info", "Initializing server worker...")
+        if self.config.get('fan_control_enabled', True) and self.fan_mode not in CUSTOM_FAN_MODES:
+            # Hand back before potentially slow FRU, firmware or broker lookups.
+            self._use_dell_auto()
 
         pid_config = self.config.get('pid_config', {})
         self.pid.setpoint = pid_config.get('target_temp', 55)
@@ -107,12 +111,18 @@ class ServerWorker:
             self.server_info["firmware"] = firmware
             self._log("info", f"iDRAC firmware version: {firmware}")
 
-        for warning in self.fan_cfg["warnings"]:
-            self._log("warning", warning)
-        self._log("info", f"Fan profile: base {self.fan_cfg['base']}%, high {self.fan_cfg['high']}% at "
-                           f"{self.fan_cfg['low']} C, Dell auto at {self.fan_cfg['critical']} C")
+        if not self.config.get('fan_control_enabled', True):
+            self._log("info", "Cooling control: monitor only; iDRAC settings are left untouched.")
+        elif self.fan_mode in CUSTOM_FAN_MODES:
+            for warning in self.fan_cfg["warnings"]:
+                self._log("warning", warning)
+            self._log("info", f"Custom fan profile: base {self.fan_cfg['base']}%, high {self.fan_cfg['high']}% at "
+                               f"{self.fan_cfg['low']} C, return to Dell auto at {self.fan_cfg['critical']} C")
+        else:
+            self._log("info", "Cooling mode: Dell automatic. Custom fan profile settings are ignored.")
 
-        if self.config.get("disable_pcie_cooling_response") and self.config.get('fan_control_enabled', True):
+        if (self.fan_mode in CUSTOM_FAN_MODES and self.config.get("disable_pcie_cooling_response")
+                and self.config.get('fan_control_enabled', True)):
             if self.ipmi.set_third_party_pcie_cooling_response(enabled=False):
                 self._pcie_response_disabled = True
             else:
@@ -199,6 +209,8 @@ class ServerWorker:
             if not self.config.get('fan_control_enabled', True):
                 self._log("info", "Fan control is disabled for this server; leaving the iDRAC fan settings untouched.")
                 target_fan_speed = "Monitor only"
+            elif self.fan_mode not in CUSTOM_FAN_MODES:
+                target_fan_speed = self._use_dell_auto()
             elif self.ipmi.fan_control_refused:
                 target_fan_speed = "Dell Auto (refused)"
             elif hottest_cpu is None:
@@ -209,7 +221,7 @@ class ServerWorker:
                 if self.fan_state.should_use_auto(hottest_cpu, crit_thresh):
                     target_fan_speed = self._use_dell_auto()
                 else:
-                    fan_mode = self.config.get('fan_mode', 'simple')
+                    fan_mode = self.fan_mode
 
                     if fan_mode == 'simple':
                         low_thresh = self.fan_cfg["low"]

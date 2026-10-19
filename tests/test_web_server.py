@@ -85,3 +85,68 @@ def test_switching_modes_keeps_saved_curve(web):
     before = json.loads(config_path.read_text())[0]["fan_curve"]
     client.post("/servers/update/fixture", data={"fan_mode": "simple"})
     assert json.loads(config_path.read_text())[0]["fan_curve"] == before
+
+
+def test_new_server_defaults_to_native_auto_without_custom_opt_in(web):
+    client, config_path = web
+    client.post("/servers/add", data={"alias": "new", "idrac_ip": "127.0.0.2"})
+    added = next(server for server in json.loads(config_path.read_text()) if server["alias"] == "new")
+    assert added["fan_mode"] == "auto"
+    assert added["fan_control_enabled"] is True
+
+
+def test_new_server_can_explicitly_select_custom_control(web):
+    client, config_path = web
+    client.post("/servers/add", data={"alias": "custom", "fan_mode": "simple"})
+    added = next(server for server in json.loads(config_path.read_text()) if server["alias"] == "custom")
+    assert added["fan_mode"] == "simple"
+
+
+def test_saved_custom_curve_can_switch_to_auto_without_deleting_curve(web):
+    client, config_path = web
+    before = json.loads(config_path.read_text())[0]["fan_curve"]
+    client.post("/servers/update/fixture", data={
+        "fan_mode": "auto", "fan_control_enabled": "true", "enabled": "true",
+    })
+    saved = json.loads(config_path.read_text())[0]
+    assert saved["fan_mode"] == "auto"
+    assert saved["fan_curve"] == before
+
+
+@pytest.mark.parametrize("path", ["/servers/add", "/servers/update/fixture"])
+def test_invalid_cooling_selection_is_rejected_without_saving(web, path):
+    client, config_path = web
+    before = config_path.read_bytes()
+    client.post(path, data={"alias": "new", "fan_mode": "invalid"})
+    assert config_path.read_bytes() == before
+
+
+def selected_cooling_mode(response):
+    from html.parser import HTMLParser
+
+    class SelectionParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.inside_mode = False
+            self.selected = None
+
+        def handle_starttag(self, tag, attrs):
+            values = dict(attrs)
+            if tag == "select":
+                self.inside_mode = values.get("name") == "fan_mode"
+            elif tag == "option" and self.inside_mode and "selected" in values:
+                self.selected = values.get("value")
+
+        def handle_endtag(self, tag):
+            if tag == "select":
+                self.inside_mode = False
+
+    parser = SelectionParser()
+    parser.feed(response.get_data(as_text=True))
+    return parser.selected
+
+
+def test_new_server_form_selects_dell_auto_and_edit_keeps_saved_custom_mode(web):
+    client, config_path = web
+    assert selected_cooling_mode(client.get("/servers")) == "auto"
+    assert selected_cooling_mode(client.get("/servers/edit/fixture")) == "curve"

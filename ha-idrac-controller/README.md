@@ -7,7 +7,7 @@ them through MQTT, and manages fan speed per server.
 ## Features
 
 - Several servers from one app instance.
-- Per-server fan control with three modes:
+- Dell automatic cooling by default for new servers. Custom modes are optional:
     - Simple thresholds: a three-tier system (base, high, critical).
     - Multi-point curve: a custom temperature-to-fan-speed curve.
     - Target temperature: a PID loop that holds a chosen CPU temperature.
@@ -19,6 +19,17 @@ them through MQTT, and manages fan speed per server.
 - MQTT discovery: entities are created automatically.
 
 ## Fan control safety
+
+Dell automatic mode hands control to the iDRAC at startup and on each poll.
+The custom speed, temperature and third-party PCIe options do not apply in this
+mode. Existing saved custom modes remain active after upgrading. Select Dell
+automatic in the server's edit form to switch an existing server.
+
+Monitor-only mode is separate: it leaves the current fan settings untouched.
+The critical_temp_threshold option applies to custom modes and means return to
+Dell automatic cooling at that CPU temperature. It is not a hardware alarm
+threshold. The polling interval is an app setting in every mode.
+
 
 CPU temperatures come from the IPMI processor entity (`3.x`), so `CPU1 Temp` on
 13G/iDRAC 8 and `Temp` on 12G/iDRAC 7 both work. Inlet and exhaust names are

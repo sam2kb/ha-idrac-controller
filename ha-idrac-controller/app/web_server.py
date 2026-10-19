@@ -3,7 +3,7 @@ from flask import Flask, render_template, request, redirect, flash
 from waitress import serve
 from markupsafe import Markup
 
-from .fan_logic import validate_fan_curve
+from .fan_logic import FAN_MODES, validate_fan_curve
 import os
 import re
 import json
@@ -119,15 +119,26 @@ def add_server():
         flash(f"Server alias '{new_alias}' already exists.", "error")
         return redirect('../servers')
 
+    fan_mode = request.form.get('fan_mode') or 'auto'
+    if fan_mode not in FAN_MODES:
+        flash("Choose a supported cooling mode.", "error")
+        return redirect('../servers')
+    try:
+        fan_curve = _parse_fan_curve(request.form) if fan_mode == 'curve' else []
+    except ValueError as error:
+        flash(f"Invalid fan curve: {error}", "error")
+        return redirect('../servers')
+
     new_server = {
         "alias": new_alias,
         "idrac_ip": (request.form.get('idrac_ip') or "").strip(),
         "idrac_username": request.form.get('idrac_username') or "root",
         "idrac_password": request.form.get('idrac_password') or "",
         "enabled": True,
-        "fan_control_enabled": request.form.get('fan_control_enabled') == 'true',
+        "fan_control_enabled": request.form.get('fan_control_enabled', 'true') == 'true',
         "disable_pcie_cooling_response": request.form.get('disable_pcie_cooling_response') == 'true',
-        "fan_mode": request.form.get('fan_mode') or "simple",
+        "fan_mode": fan_mode,
+        "fan_curve": fan_curve,
         "base_fan_speed_percent": _int_field(request.form, 'base_fan_speed_percent', 20),
         "low_temp_threshold": _int_field(request.form, 'low_temp_threshold', 45),
         "high_temp_fan_speed_percent": _int_field(request.form, 'high_temp_fan_speed_percent', 50),
@@ -143,7 +154,7 @@ def edit_server_form(alias):
     servers = load_servers_config()
     server_to_edit = next((s for s in servers if s['alias'] == alias), None)
     if server_to_edit:
-        server_to_edit.setdefault('fan_mode', 'simple')
+        server_to_edit.setdefault('fan_mode', 'auto')
         server_to_edit.setdefault('fan_curve', [])
         server_to_edit.setdefault('pid_config', {})
         server_to_edit.setdefault('target_temp', 55)
@@ -162,7 +173,10 @@ def update_server(alias):
         flash(f"Server '{alias}' not found.", "error")
         return redirect('../../servers')
 
-    fan_mode = request.form.get('fan_mode') or 'simple'
+    fan_mode = request.form.get('fan_mode') or server_to_update.get('fan_mode', 'auto')
+    if fan_mode not in FAN_MODES:
+        flash("Choose a supported cooling mode.", "error")
+        return redirect('../../servers')
     fan_curve = server_to_update.get('fan_curve', [])
     if fan_mode == 'curve':
         try:

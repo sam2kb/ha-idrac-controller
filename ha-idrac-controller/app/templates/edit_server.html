@@ -19,13 +19,13 @@
                     <div class="form-group"><label for="idrac_password">New Password</label><input type="password" id="idrac_password" name="idrac_password" placeholder="Leave blank to keep existing"></div>
                     <div class="form-group"><label for="enabled">Enabled</label><select id="enabled" name="enabled"><option value="true" {% if server.enabled %}selected{% endif %}>Yes</option><option value="false" {% if not server.enabled %}selected{% endif %}>No</option></select></div>
                     <div class="form-group">
-                        <label for="fan_control_enabled">Fan Control</label>
+                        <label for="fan_control_enabled">Cooling Control</label>
                         <select id="fan_control_enabled" name="fan_control_enabled">
-                            <option value="true" {% if server.fan_control_enabled %}selected{% endif %}>Enabled</option>
-                            <option value="false" {% if not server.fan_control_enabled %}selected{% endif %}>Disabled (Monitor Only)</option>
+                            <option value="true" {% if server.fan_control_enabled %}selected{% endif %}>Apply selected mode</option>
+                            <option value="false" {% if not server.fan_control_enabled %}selected{% endif %}>Monitor only (leave settings untouched)</option>
                         </select>
                     </div>
-                    <div class="form-group">
+                    <div class="form-group" id="pcie-cooling-setting">
                         <label for="disable_pcie_cooling_response">Third-party PCIe cooling</label>
                         <select id="disable_pcie_cooling_response" name="disable_pcie_cooling_response">
                             <option value="false" {% if not server.disable_pcie_cooling_response %}selected{% endif %}>Dell default (recommended)</option>
@@ -39,10 +39,15 @@
                 <div class="form-group">
                     <label for="fan_mode">Select Fan Mode</label>
                     <select id="fan_mode" name="fan_mode" onchange="updateFanMode()">
+                        <option value="auto" {% if server.fan_mode == 'auto' %}selected{% endif %}>Dell automatic (recommended)</option>
                         <option value="simple" {% if server.fan_mode == 'simple' %}selected{% endif %}>Simple Thresholds</option>
                         <option value="curve" {% if server.fan_mode == 'curve' %}selected{% endif %}>Multi-Point Curve</option>
                         <option value="target" {% if server.fan_mode == 'target' %}selected{% endif %}>Target Temperature (PID)</option>
                     </select>
+                </div>
+
+                <div id="auto-mode" class="fan-mode-section">
+                    <p>Dell controls cooling. Custom speeds and temperature thresholds are ignored.</p>
                 </div>
 
                 <div id="simple-mode" class="fan-mode-section">
@@ -51,7 +56,7 @@
                         <div class="form-group"><label>Base Fan Speed (%)</label><input type="number" name="base_fan_speed_percent" value="{{ server.base_fan_speed_percent }}" min="5" max="100"></div>
                         <div class="form-group"><label>Low Temp Threshold (°C)</label><input type="number" name="low_temp_threshold" value="{{ server.low_temp_threshold }}" min="0" max="100"></div>
                         <div class="form-group"><label>High Temp Fan Speed (%)</label><input type="number" name="high_temp_fan_speed_percent" value="{{ server.high_temp_fan_speed_percent }}" min="5" max="100"></div>
-                        <div class="form-group"><label>Critical Temp Threshold (°C)</label><input type="number" name="critical_temp_threshold" value="{{ server.critical_temp_threshold }}" min="0" max="100"></div>
+                        <div class="form-group"><label>Return to Dell Auto at CPU Temp (°C)</label><input type="number" name="critical_temp_threshold" value="{{ server.critical_temp_threshold }}" min="0" max="100"></div>
                     </div>
                 </div>
 
@@ -104,6 +109,8 @@
     <script>
         function updateFanMode() {
             const mode = document.getElementById('fan_mode').value;
+            document.getElementById('auto-mode').style.display = (mode === 'auto') ? 'block' : 'none';
+            document.getElementById('pcie-cooling-setting').style.display = (mode === 'auto') ? 'none' : 'block';
             document.getElementById('simple-mode').style.display = (mode === 'simple') ? 'block' : 'none';
             document.getElementById('target-mode').style.display = (mode === 'target') ? 'block' : 'none';
             document.getElementById('curve-mode').style.display = (mode === 'curve') ? 'block' : 'none';
