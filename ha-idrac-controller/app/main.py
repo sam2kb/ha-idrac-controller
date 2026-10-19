@@ -261,7 +261,6 @@ class ServerWorker:
             target_fan_speed = "Dell Auto"
 
             if not self.config.get('fan_control_enabled', True):
-                self._log("info", "Fan control is disabled for this server; leaving the iDRAC fan settings untouched.")
                 target_fan_speed = "Monitor only"
             elif self.fan_mode not in CUSTOM_FAN_MODES:
                 target_fan_speed = self._use_dell_auto()

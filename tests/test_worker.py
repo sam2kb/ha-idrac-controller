@@ -444,7 +444,7 @@ def test_battery_discovery_is_optional_and_failed_reads_clear_stale_health(make_
     temperatures = {"cpu_temps": [35]}
     item._update_status(temperatures, [], 70, [], "Dell Auto")
     assert not any("/idrac_controller_fixture_battery_" in call.args[0] for call in item.mqtt.publish.call_args_list)
-    battery = {"name": "CMOS Battery", "health": "Healthy", "voltage": 3.1}
+    battery = {"name": "CMOS Battery", "health": "OK", "voltage": 3.1}
     item._update_status(temperatures, [], 70, [], "Dell Auto", [battery])
     payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
     slug = "battery_cmos_battery"
@@ -468,7 +468,7 @@ def test_discrete_battery_health_does_not_invent_voltage(make_worker):
     del item._publish_mqtt_data
     item.mqtt.is_connected = True
     item._update_status({"cpu_temps": [35]}, [], 70, [], "Dell Auto", [
-        {"name": "CMOS Battery", "health": "Healthy", "voltage": None},
+        {"name": "CMOS Battery", "health": "OK", "voltage": None},
     ])
     topics = [call.args[0] for call in item.mqtt.publish.call_args_list]
     assert any("battery_cmos_battery_health" in topic for topic in topics)
@@ -772,14 +772,63 @@ def test_advanced_off_keeps_core_health_and_load_but_not_auxiliary_metadata(make
     item.mqtt.is_connected = True
     item._power_details = item.ipmi.parse_power_details(POWER_DETAILS)
     item._update_status({"cpu_temps": [35]}, [], 70, [{"name": "PSU1", "ok": True}], "Monitor only",
-                        batteries=[{"name": "CMOS Battery", "health": "Healthy", "voltage": 3.1}], intrusion={"active": False})
+                        batteries=[{"name": "CMOS Battery", "health": "OK", "voltage": 3.1}], intrusion={"active": False})
     payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
     assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/power_capacity_percent"])["state"] == 7.78
     assert payloads[f"{item.mqtt.base_topic}/binary_sensor/psu_psu1"] == "OFF"
     assert payloads[f"{item.mqtt.base_topic}/binary_sensor/system_board_intrusion"] == "OFF"
-    assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/battery_cmos_battery_health"])["state"] == "Healthy"
+    assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/battery_cmos_battery_health"])["state"] == "OK"
     for slug in ("power_capacity_watts", "power_warning_watts", "power_failure_watts", "battery_cmos_battery_voltage"):
         assert f"homeassistant/sensor/idrac_controller_fixture_{slug}/config" not in payloads
         item._reconcile_extra_discovery(slug, {"name": slug, "device_class": "power"})
     tombstones = [call.args[0] for call in item.mqtt.publish.call_args_list if call.args[1] == ""]
     assert len(tombstones) == 4
+
+
+def test_monitor_only_logs_mode_once_at_startup_not_each_poll(make_worker):
+    item = make_worker(fan_control_enabled=False)
+    item._initialize()
+    run_cycles(item, 3)
+    notices = [call.args[1] for call in item._log.call_args_list
+               if "monitor only" in call.args[1].lower() or "fan control is disabled" in call.args[1].lower()]
+    assert notices == ["Cooling control: monitor only; iDRAC settings are left untouched."]
+    item.ipmi.apply_user_fan_control_profile.assert_not_called()
+    item.ipmi.apply_dell_fan_control_profile.assert_not_called()
+
+
+
+def test_real_t430_battery_rows_publish_two_ok_health_entities(make_worker):
+    import json
+    item = make_worker(fan_control_enabled=False)
+    item._initialize()
+    del item._publish_mqtt_data
+    item.mqtt.is_connected = True
+    rows = "CMOS Battery | 65h | ok | 7.1 |\nROMB Battery | 68h | ok | 11.1 |\nROMB Battery | 69h | ns | 11.2 | Disabled"
+    batteries = item.ipmi.parse_battery_status(rows)
+    item._update_status({"cpu_temps": [34, 31]}, [], 84, [], "Monitor only", batteries)
+    payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+    for slug in ("battery_cmos_battery_health", "battery_romb_battery_health"):
+        assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/{slug}"])["state"] == "OK"
+    assert len(main.ALL_SERVERS_STATUS[item.alias]["batteries"]) == 2
+    # Losing the real reading still clears its old OK state.
+    item.mqtt.publish.reset_mock()
+    item._update_status({"cpu_temps": [34]}, [], 84, [], "Monitor only", item.ipmi.parse_battery_status(rows.replace("68h | ok", "68h | ns")))
+    payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+    assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/battery_romb_battery_health"])["state"] == "Unknown"
+    item.ipmi.apply_user_fan_control_profile.assert_not_called()
+    item.ipmi.apply_dell_fan_control_profile.assert_not_called()
+
+
+
+def test_same_named_active_batteries_keep_separate_mqtt_health(make_worker):
+    import json
+    item = make_worker(fan_control_enabled=False)
+    item._initialize()
+    del item._publish_mqtt_data
+    item.mqtt.is_connected = True
+    rows = "ROMB Battery | 69h | cr | 11.2 | Failed\nROMB Battery | 68h | ok | 11.1 | Present"
+    item._update_status({"cpu_temps": [34]}, [], 84, [], "Monitor only", item.ipmi.parse_battery_status(rows))
+    payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+    for slug, value in (("battery_romb_battery_health", "OK"), ("battery_romb_battery_11_2_69h_health", "Failed")):
+        assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/{slug}"])["state"] == value
+        assert f"homeassistant/sensor/idrac_controller_fixture_{slug}/config" in payloads

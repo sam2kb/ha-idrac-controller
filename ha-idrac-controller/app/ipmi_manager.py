@@ -40,6 +40,7 @@ class IPMIManager:
         self.base_args = self._build_base_args(conn_type)
         self.last_stderr = ""
         self._sensor_types = {}
+        self._battery_primary = {}
         # Set when the iDRAC answers "I do not have that command" or "not for
         # this account". Only ever set while no fan command has succeeded, so
         # a later failure can never leave the fans pinned at a user speed.
@@ -417,13 +418,31 @@ class IPMIManager:
         health states, not charge percentages. Unavailable readings stay unknown.
         """
         batteries = []
+        candidates = {}
         for line in (sdr_data or "").splitlines():
             fields = [part.strip() for part in line.split("|")]
             if len(fields) != 5:
                 continue
             if fields[3].split(".")[0] != "40" and not self._has_sensor_type(fields, "Battery") and not re.search(r"\b(?:battery|batt|vbatt|cmos)\b", fields[0], re.IGNORECASE):
                 continue
-            name, _, status, _, reading = fields
+            identity = (fields[0], fields[1].lower(), fields[3])
+            candidates[identity] = fields
+        # The same label can describe multiple battery slots. Give the lowest
+        # entity/sensor identity the legacy name; keep that choice if a later
+        # poll omits it. Disabled spare slots must not replace an active battery.
+        def identity_order(identity):
+            _, sensor, entity = identity
+            entity_parts = tuple(int(part) for part in entity.split(".")) if re.fullmatch(r"\d+\.\d+", entity) else (999, 999)
+            number = int(sensor[:-1], 16) if re.fullmatch(r"[0-9a-f]+h", sensor) else 999
+            return identity[0], entity_parts, number, sensor, entity
+
+        for identity in sorted(candidates, key=identity_order):
+            name, sensor, status, entity, reading = candidates[identity]
+            primary = self._battery_primary.setdefault(name, identity)
+            if status.lower() in ("ns", "na", "u") and reading.lower() == "disabled":
+                continue
+            if identity != primary:
+                name = f"{name} ({entity}, {identity[1]})"
             reading_lower = reading.lower()
             health = "Unknown"
             voltage = None
@@ -438,11 +457,11 @@ class IPMIManager:
                 elif re.search(r"\b(?:absent|missing|not present)\b", reading_lower):
                     health = "Missing"
                 elif status.lower() == "ok" and ("presence detected" in reading_lower or reading_lower in ("ok", "present") or voltage_match):
-                    health = "Healthy"
+                    health = "OK"
                 elif status.lower() == "ok" and reading_lower in ("", "0x00", "0x0000", "state deasserted", "deasserted"):
                     # Compact discrete sensors print nothing when no event is
                     # asserted. This does not prove a battery is installed.
-                    health = "No fault reported"
+                    health = "OK"
                 elif status.lower() == "ok" and reading_lower in ("state asserted", "asserted"):
                     health = "Warning"
                 if voltage_match:

@@ -366,13 +366,13 @@ def test_dashboard_labels_cpu_sockets_and_shows_reported_battery_health(web, mon
         "power_warning_watts": 896, "power_failure_watts": 980,
         "intrusion_seen": True, "intrusion_active": False,
         "cpu_temps_c": [35, 32], "cpu_ids": [1, 2], "actual_fan_rpms": [],
-        "batteries": [{"name": "CMOS Battery", "health": "Healthy", "voltage": None}],
+        "batteries": [{"name": "CMOS Battery", "health": "OK", "voltage": None}],
     }])
     page = client.get("/")
     assert page.status_code == 200
     text = page.get_data(as_text=True)
     assert "CPU1: 35" in text and "CPU2: 32" in text
-    assert "CMOS Battery" in text and "Healthy" in text
+    assert "CMOS Battery" in text and "OK" in text
     assert "None V" not in text
     assert "7.78% Capacity" in text
     assert "System Board Intrusion" in text and "Clear" in text

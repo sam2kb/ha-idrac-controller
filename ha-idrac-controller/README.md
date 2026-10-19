@@ -1,286 +1,147 @@
 # HA iDRAC Controller
 
-Control one or more Dell PowerEdge servers from Home Assistant over IPMI. The
-app reads temperatures, fan speeds, power consumption and PSU status, publishes
-them through MQTT, and manages fan speed per server.
+Monitor iDRAC 7/8 PowerEdge servers in Home Assistant, with optional cooling and
+power controls. Each server has an MQTT device and a dashboard in the app.
 
-## Features
+[Install](#install) · [Configure](#configure) · [Sensors](#sensors) ·
+[Cooling](#cooling) · [Power actions](#power-actions) ·
+[Troubleshooting](#troubleshooting) ·
+[Technical reference](https://github.com/sam2kb/ha-idrac-controller/blob/main/docs/reference.md)
 
-- Several servers from one app instance.
-- Dell automatic cooling by default for new servers. Custom modes are optional:
-    - Simple thresholds: a three-tier system (base, high, critical).
-    - Multi-point curve: a custom temperature-to-fan-speed curve.
-    - Target temperature: a PID loop that holds a chosen CPU temperature.
-- Monitoring: each server becomes an MQTT device with sensors for individual
-  CPU temperatures, hottest CPU, inlet and exhaust temperatures, fan RPM, power
-  consumption, target fan speed and PSU status.
-- Optional power-on, graceful shutdown, reset, power cycle and forced-off buttons, each
-  disabled by default per server.
-- A web UI through ingress: a live dashboard and a Manage Servers page.
-- MQTT discovery: entities are created automatically.
+## Install
 
-## Fan control safety
+Requirements:
 
-Dell automatic mode hands control to the iDRAC at startup and on each poll.
-The custom speed, temperature and third-party PCIe options do not apply in this
-mode. Existing saved custom modes remain active after upgrading. Select Dell
-automatic in the server's edit form to switch an existing server.
+- Dell PowerEdge with iDRAC 7 or 8, such as R720, R630, R730 or T430.
+- IPMI over LAN enabled and an iDRAC Administrator account. Look under iDRAC
+  Settings → Network/Connectivity → IPMI Settings; set the channel privilege
+  limit to Administrator.
+- Network access from HA to each iDRAC on UDP 623.
+- An MQTT broker reachable from HA. Mosquitto is the usual choice.
 
-Monitor-only mode is separate: it leaves the current fan settings untouched.
-The critical_temp_threshold option applies to custom modes and means return to
-Dell automatic cooling at that CPU temperature. It is not a hardware alarm
-threshold. The polling interval is an app setting in every mode.
+In Settings → Apps → Install app, open the three-dot menu, choose Repositories,
+and add:
 
+```
+https://github.com/sam2kb/ha-idrac-controller
+```
 
-CPU temperatures come from the IPMI processor entity (`3.x`), so `CPU1 Temp` on
-13G/iDRAC 8 and `Temp` on 12G/iDRAC 7 both work. Inlet and exhaust names are
-anchored, so `PSU1 Inlet Temp` cannot replace the chassis inlet.
+Install HA iDRAC Controller from the app store. iDRAC 9 and newer are outside scope.
 
-A 2 °C hysteresis band stops the fans from flapping between speeds, and requests
-below 5% are clamped to 5%. If manual mode is enabled but the speed write fails,
-the fans go back to Dell auto. A server that refuses fan control with
-`0xc1`/`0xd4`/`0xd5` is detected once, then monitoring continues. An optional
-per-server setting disables Dell's third-party PCIe cooling response and
-restores it when the app stops.
+## Configure
 
-MQTT outages do not stop a worker. The app reconnects and republishes discovery.
-The iDRAC password goes through `ipmitool -E`, so it does not appear in the
-process list. The Supervisor watchdog probes `/health`, which fails only when
-every server worker has died. The MQTT device carries the iDRAC firmware version
-and service tag. Contradictory thresholds are corrected with a warning, and
-temperatures outside -20 to 125 °C are ignored.
+1. Leave MQTT host, username and password blank to use Supervisor's registered
+   broker, normally core-mosquitto. For a manual broker, enter its connection
+   details in Configuration. The other values there are defaults for new servers.
+2. Start the app and open Web UI → Manage Servers.
+3. Add each server's alias, iDRAC address and credentials. Choose its cooling mode.
+4. Choose Save and reload app to apply the configuration.
 
-Temperature readings and cooling thresholds use Celsius. Home Assistant may
-convert sensor displays to your preferred unit. To keep server sensors in °C,
-open each temperature entity's settings and select °C as its unit of measurement.
-MQTT discovery does not expose a per-device display-unit override.
+Regular Save writes the configuration for the next reload. Save and reload app
+restarts only this app through Supervisor, then returns to Manage Servers inside
+HA ingress. If reload fails, your saved settings remain intact.
 
-CPU temperatures are labeled CPU1, CPU2 and so on, using the socket number
-reported by IPMI. Existing MQTT unique IDs stay unchanged to preserve automations.
-A missing CPU reading stays unknown and does not shift the other socket's label.
+Automatic MQTT uses Supervisor's service credentials in memory; they are not
+copied to options or logs. Clear an existing manual host, username and password,
+save options and restart this app to switch to automatic. Brokers configured
+only in HA's MQTT integration need manual settings here. MQTT outages are retried
+while IPMI monitoring continues.
 
-Battery health appears only when the SDR data exposes a battery, such as the
-CMOS battery. Voltage appears only if a numeric voltage is reported. These
-sensors use the existing SDR poll and do not estimate charge percentages.
-An unavailable battery reading is shown as Unknown. A readable discrete sensor
-with no asserted event shows No fault reported; that does not confirm a battery
-is installed.
+Server credentials are stored in plain text in the app's private
+`/data/servers_config.json`. Use a dedicated account/password.
 
-The dashboard shows watts and capacity used when the server reports enough data.
-Capacity reference uses Dell's instantaneous power reading plus instantaneous
-headroom. The ordinary SDR watt reading can be rounded and is not used to
-calculate that reference. PSU nameplate ratings and warning/failure thresholds
-are separate measurements. Missing or unsupported values remain unknown.
-Dell total-power reads work independently of sensor labels and also supply
-watts when no recognized system SDR sensor is available. An arbitrary board or
-PSU watt sensor is never treated as total server power. Power details refresh
-at most once a minute, after cooling control. The threshold
-query times out after five seconds; each of the two Dell read queries times out
-after three seconds. These queries do not change power caps or server settings.
+## Sensors
 
-Sensor discovery uses standard IPMI types and entity IDs where available, with
-Dell label fallbacks for older firmware. Battery, Power Supply, and Physical
-Security identities refresh in rotation, one type per minute with a five-second
-timeout, after cooling control. Values always come from the current SDR poll.
-CPU and inlet identification also recognizes standard processor and air-inlet
-entities. Exhaust labels remain a fallback because generic IPMI has no universal
-exhaust-temperature entity. An absent exhaust sensor stays unknown; target fan
-speed stays unknown when the app is not setting a manual speed.
+Each server appears as `iDRAC (<alias>)` with model, firmware and service tag.
+Important readings are included by default, when available:
 
-PSU problem sensors decode asserted failure and lost-input events even when a
-presence message is missing. Unreadable or missing readings make a previously
-discovered PSU unavailable. An empty PSU bay does not create a failure sensor.
-Firmware, installed hardware, privileges, and licensing determine which optional
-measurements are available. Parser tests cover iDRAC 7/8 output variants; they do
-not establish that every model and firmware version has been tested on hardware.
+- CPU1/CPU2 and other temperatures, hottest CPU, fan RPM and cooling status.
+- Total power, capacity used, battery health, PSU problems and intrusion.
+- Redundancy, named hardware alarms and Hardware threshold status.
 
-### Sensor visibility
+Enable Include advanced diagnostics in Edit for voltage/current, battery
+voltage, power reference/thresholds, detailed Dell power/headroom and other
+signals. Choose Save and reload app. Turning it off removes optional MQTT
+entities and dashboard readings; enabling it again reuses their identifiers.
 
-Important readings are enabled by default. For extra detail, open Manage Servers,
-edit the server, set Include advanced diagnostics to On, and choose Save and
-reload app. The switch applies to both Home Assistant MQTT entities and the web
-dashboard. It defaults to Off for new and existing servers.
+Hardware threshold status summarises readable threshold warnings/critical
+alarms; affected readings appear in its alerts attribute. No alerts is not a
+whole-server health assessment. Battery, PSU and intrusion states are separate.
+Generic Active/Inactive states describe signals, not good/bad health; attributes
+retain their raw text.
 
-| Always included when reported | Advanced diagnostics adds |
+Unavailable or unrecognised readings stay Unknown. Batteries have health and,
+when reported with advanced diagnostics enabled, voltage; no charge percentage
+is estimated. An unreported exhaust sensor stays unknown. Target fan speed is
+unknown when the app is not setting a manual percentage.
+
+Temperatures and thresholds use °C. HA can convert the display: select °C in each
+temperature entity's settings if needed. Existing core unique IDs are preserved;
+additional entities use IPMI sensor/entity IDs. You can rename entities in HA.
+
+See the [sensor reference](https://github.com/sam2kb/ha-idrac-controller/blob/main/docs/reference.md#sensors)
+for battery states, power calculations and firmware limitations.
+
+## Cooling
+
+New servers default to Dell automatic. Existing custom settings remain active
+until changed in Edit.
+
+| Mode | Behaviour |
 | --- | --- |
-| CPU and other temperatures, fan RPM, cooling mode | Voltage/current readings and battery voltage |
-| Total power and capacity used | Capacity reference, warning/failure thresholds, detailed Dell power/current/headroom |
-| Battery health, PSU faults, intrusion | Additional presence messages and generic signal states |
-| Redundancy and clearly named hardware alarms | Other available diagnostic readings |
+| Dell automatic | Hands cooling to iDRAC at startup and each poll. Ignores custom/PCIe options. |
+| Monitor only | Reads sensors without changing cooling settings. |
+| Simple thresholds | Selects base/high speed, returning to Dell automatic at the critical threshold. |
+| Curve | Interpolates a temperature-to-speed curve. |
+| Target temperature | Uses a PID loop to hold a CPU temperature. |
 
-Hardware threshold status stays enabled with the switch off. It reports Warning
-or Critical for readable threshold alarms, with the affected readings in its
-alerts attribute. No alerts means no readable threshold alarms were reported;
-PSU, battery, intrusion, and digital alarm statuses remain separate. A failed
-full-SDR read makes this summary unknown.
+Custom speeds have a 5% floor and simple control has 2 °C hysteresis. Missing CPU
+temperatures or a failed manual speed write return control to Dell automatic.
+Refused fan commands switch to monitoring. The custom critical temperature is
+an app safety setting, not the processor's hardware limit.
 
-Advanced readings are lightly filtered: blank, unset, unreadable, opaque raw
-codes, and non-finite values are omitted. Zero is a valid measurement. Generic
-State Asserted/State Deasserted signals display Active/Inactive, with the original
-text in the raw_reading attribute. Those words describe the signal and do not
-establish whether the hardware is healthy.
+Normal app shutdown/reload returns enabled cooling to Dell automatic and restores
+any PCIe cooling override. A hard container kill can skip cleanup and leave the
+last manual speed active. The Supervisor watchdog restarts the app. Monitor-only
+servers are left untouched.
 
-Additional sensor IDs use the IPMI sensor number and entity ID. Existing core
-numeric entities are reused. Turning the switch off removes this server's
-optional discovery entries, including retained entries from earlier versions;
-turning it on rediscovers available readings with the same identifiers. Missing
-enabled readings become unavailable. The app checks its own device identity
-before changing discovery entries and ignores other devices' payloads.
+See the [cooling reference](https://github.com/sam2kb/ha-idrac-controller/blob/main/docs/reference.md#cooling)
+before choosing a custom profile.
 
-These readings use the existing SDR and Dell power polls. Reserved Dell fields
-are excluded. A custom MQTT ACL must allow subscribing to sensor discovery
-messages for cleanup of previously published optional entities.
+## Power actions
 
-System Board Intrusion is an MQTT tamper sensor for alerts. On means intrusion
-is asserted; off means clear. Missing readings make the sensor unavailable.
-It uses the existing SDR poll and does not clear or acknowledge intrusion events.
+All actions are disabled by default, including on existing servers. In Edit →
+Server power actions, enable each action separately, then Save and reload app.
+Only enabled actions appear in HA's device configuration controls.
 
-## Saving changes
+| Action | Effect |
+| --- | --- |
+| Power On System | Starts a powered-off server. |
+| Graceful Shutdown | Requests OS shutdown and power off through ACPI; never falls back to forced off. |
+| Reset System (warm boot) | Immediate hardware reset, without OS shutdown. |
+| Power Cycle System (cold boot) | Cuts power, then starts the server. |
+| Power Off System (forced) | Immediately cuts server power. |
 
-Save writes your server configuration and shows a notice to reload or restart
-the app. Save and reload app saves first, then asks Home Assistant Supervisor
-to restart HA iDRAC Controller. The progress page stays inside ingress on both
-web and mobile and returns to Manage Servers when the new app process responds.
-A failed reload leaves the saved configuration intact and shows an error.
+Reset, power cycle and forced off can lose unsaved data. Use the OS for a graceful
+reboot. Enabled buttons have no extra confirmation. NMI is not offered.
+Power permissions are independent of cooling mode.
 
-This restarts only the controller app. Home Assistant and your servers keep
-running. Normal shutdown cleanup returns custom cooling control to Dell auto;
-monitor-only servers keep their existing settings. The reload button is
-available when running as a Home Assistant app and needs no extra API privileges.
-
-## Prerequisites
-
-1.  Dell PowerEdge server with iDRAC 7 or 8. Both the 12th-generation sensor
-    naming (`Temp`, iDRAC 7, for example R720) and the 13th-generation naming
-    (`CPU1 Temp`/`CPU2 Temp`, iDRAC 8, for example T430, R630 and R730) are
-    supported and covered by unit tests. The fan commands were originally
-    verified on an R720; check the log on first start with a different model.
-2.  Network connectivity from Home Assistant to each iDRAC address.
-3.  IPMI over LAN enabled on each iDRAC. In the iDRAC web interface, open iDRAC
-    Settings, then Network (or Connectivity), then IPMI Settings. Enable IPMI
-    over LAN and set the channel privilege limit to Administrator.
-4.  An MQTT broker that Home Assistant can reach. The Mosquitto app is the usual
-    choice.
-
-## Installation
-
-1.  In Home Assistant, open Settings, then Apps, then Install app.
-2.  Open the three-dot menu and choose Repositories.
-3.  Paste this URL and add it:
-
-    ```
-    https://github.com/sam2kb/ha-idrac-controller
-    ```
-
-4.  Install HA iDRAC Controller from the app store.
-
-
-## Configuration
-
-Most settings live in the app's web UI.
-
-1.  Leave the MQTT host, username and password empty to use Home Assistant's
-    registered broker automatically. For an external broker, enter its host,
-    port and credentials in the Configuration tab. The fan speed and temperature
-    values there are global defaults for new servers. Save the settings.
-2.  Start the app, then click Open Web UI.
-3.  Open Manage Servers and use the Add New Server form. It is pre-filled with
-    the global defaults.
-4.  Choose Save and reload app to save the server and apply its settings. Regular
-    Save writes the configuration and shows a notice to reload later.
-
-### Automatic MQTT setup
-
-The app reads the registered broker's address, port and service credentials from
-Home Assistant Supervisor. With the Mosquitto app, this is normally
-core-mosquitto. The credentials stay in memory and are not copied to your app
-options or logs. The service must use MQTT 3.1.1; TLS is enabled when the service
-requires it.
-
-An older core-mosquitto default with no credentials also uses automatic setup.
-A manually entered host with credentials, or an external host, takes precedence.
-To switch an existing manual setup to automatic, clear the host, username and
-password, save the options, and restart this app.
-
-If the service is unavailable, the app retries while IPMI monitoring continues.
-Supervisor requests use a three-second connection timeout. External brokers
-configured only in Home Assistant's MQTT integration still need manual
-connection settings here.
-
-## Web UI
-
-The dashboard shows live data for every enabled server and refreshes itself.
-The Manage Servers page adds, edits and deletes servers, and sets the fan mode
-and thresholds for each one. Choose Save and reload app to apply the changes.
-Regular Save keeps the current running settings until the next reload.
-
-## Server power actions
-
-Power buttons are disabled for every server by default, including servers saved
-before this option existed. In Manage Servers, open Edit and expand Server
-power actions. Enable each action separately, then choose Save and reload app.
-Only enabled actions appear in the Home Assistant device's configuration controls.
-
-- Power On System starts a server that is off.
-- Graceful Shutdown sends an ACPI request for the OS to shut down and power off.
-  The OS must support the request. This action never falls back to forced off.
-- Reset System (warm boot) is an immediate hardware reset, without an OS
-  shutdown. Use the server's OS for a graceful reboot.
-- Power Cycle System (cold boot) cuts power, then starts the server again.
-- Power Off System (forced) immediately cuts server power.
-
-Reset, power cycle and forced off can lose unsaved data. Each has its own
-opt-in. NMI is a diagnostic interrupt, not a normal power action.
-
-On update and reconnect, the app removes disabled buttons from MQTT discovery,
-including the old shutdown button. Commands for disabled actions are rejected.
-Retained command replays are ignored, old retained commands are cleared before
-subscription, and repeated power commands within 30 seconds are ignored.
-There is no extra confirmation when pressing an enabled Home Assistant button.
-These permissions are independent of cooling control.
-
-The cooling-status sensor reports Dell Auto, Monitor only, custom control, or a
-fallback/error status. Target fan speed is a percentage only when the app sets
-one; it is unknown in automatic mode. An unknown exhaust temperature means the
-app has no usable exhaust reading, rather than a measured zero.
-
-## Entities in Home Assistant
-
-Each server becomes a device named `iDRAC (<alias>)` with:
-
-- battery health and voltage, when reported by iDRAC
-- a System Board Intrusion tamper sensor, when reported
-- power capacity used, capacity reference and warning/failure thresholds
-- a cooling-status sensor
-- power-on, graceful shutdown, reset, power cycle and forced-off buttons, when explicitly
-  enabled for that server
-- a PSU problem sensor for each power supply
-- sensors for CPU temperatures, hottest CPU, inlet, exhaust, fan RPM, power and
-  target fan speed
-
-Existing entity IDs derive from the alias and sensor names; additional SDR
-entities use the sensor number and entity ID. Rename them in Home
-Assistant if you need different IDs.
+Disabled actions are rejected and their discovery entries removed. Retained
+commands are cleared/ignored, and repeated commands within 30 seconds are ignored.
 
 ## Troubleshooting
 
-- Check the app log first. Set the log level to `debug` or `trace` in the
-  Configuration tab for more detail.
-- For IPMI errors, confirm that IPMI over LAN is enabled and that the
-  credentials in the web UI are correct.
-- For MQTT errors in automatic mode, check that the Mosquitto app is running
-  and provides the MQTT service. For a manual broker, check the connection
-  settings in the Configuration tab.
-- If sensor values are missing or wrong, the log shows the raw SDR data at
-  debug level. Open an issue with the `ipmitool sdr type temperature` lines for
-  your model.
+- IPMI: check IPMI over LAN, credentials, privilege and UDP 623 access.
+- MQTT: check that Mosquitto provides the Supervisor MQTT service, or verify your
+  manual broker settings. Automatic discovery requires MQTT 3.1.1; advertised TLS
+  is honoured. Custom broker ACLs must allow reading sensor discovery for cleanup.
+- Missing sensors: set log_level to debug or trace and inspect the raw SDR output.
+  Include the relevant `ipmitool sdr type temperature` or battery rows when
+  [reporting an issue](https://github.com/sam2kb/ha-idrac-controller/issues), along
+  with app version, server model and firmware. Remove credentials and personal details.
+- Unsupported sensors: firmware, installed hardware, permissions and licensing
+  determine availability. Tests cover output variants, not every physical model.
 
-## Reporting issues
-
-Open an issue at
-[sam2kb/ha-idrac-controller](https://github.com/sam2kb/ha-idrac-controller/issues)
-and say which version you are running.
-
-## License
-
-MIT.
+[Changelog](https://github.com/sam2kb/ha-idrac-controller/blob/main/ha-idrac-controller/CHANGELOG.md) ·
+[Migration guide](https://github.com/sam2kb/ha-idrac-controller/blob/main/MIGRATION.md) ·
+[MIT license](https://github.com/sam2kb/ha-idrac-controller/blob/main/LICENSE)

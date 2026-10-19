@@ -200,11 +200,11 @@ def test_cpu_socket_ids_follow_ipmi_names_and_12g_entity_instances():
 def test_battery_health_uses_reported_discrete_states_and_optional_voltage():
     manager = make_manager()
     rows = [
-        ("ok", "Presence Detected", "Healthy", None),
+        ("ok", "Presence Detected", "OK", None),
         ("ok", "Presence Detected, Low", "Low", None),
         ("ok", "Failed, Presence Detected", "Failed", None),
         ("ok", "Not Present", "Missing", None),
-        ("ok", "3.12 Volts", "Healthy", 3.12),
+        ("ok", "3.12 Volts", "OK", 3.12),
         ("lcr", "2.0 Volts", "Failed", 2.0),
         ("nr", "2.0 Volts", "Failed", 2.0),
         ("lnc", "2.7 Volts", "Warning", 2.7),
@@ -224,7 +224,7 @@ def test_multiple_batteries_are_independent_and_do_not_create_charge_percentages
     result = make_manager().parse_battery_status(
         "CMOS Battery | 0Fh | ok | 23.1 | Presence Detected\n"
         "RAID Battery | 10h | ok | 23.2 | Low\n")
-    assert [battery["health"] for battery in result] == ["Healthy", "Low"]
+    assert [battery["health"] for battery in result] == ["OK", "Low"]
     assert all(set(battery) == {"name", "health", "voltage"} for battery in result)
 
 
@@ -293,7 +293,7 @@ def test_readable_battery_with_no_asserted_events_does_not_require_presence_text
     manager = make_manager()
     for reading in ("", "0x00", "0x0000", "State Deasserted"):
         result = manager.parse_battery_status(f"CMOS Battery | 0Fh | ok | 23.1 | {reading}")
-        assert result[0]["health"] == "No fault reported"
+        assert result[0]["health"] == "OK"
     assert manager.parse_battery_status("ROMB Battery | 10h | ns | 23.2 | No Reading")[0]["health"] == "Unknown"
 
 
@@ -350,7 +350,7 @@ def test_typed_inventory_classifies_unfamiliar_names_and_keeps_only_identities(m
     run.side_effect = None
     run.return_value = None
     manager.refresh_sensor_type("Battery")
-    assert manager.parse_battery_status(rows["Battery"])[0]["health"] == "Healthy"
+    assert manager.parse_battery_status(rows["Battery"])[0]["health"] == "OK"
     run.return_value = ""
     manager.refresh_sensor_type("Battery")
     assert manager.parse_battery_status(rows["Battery"]) == []
@@ -358,8 +358,8 @@ def test_typed_inventory_classifies_unfamiliar_names_and_keeps_only_identities(m
 
 def test_standard_battery_entity_and_generic_states():
     manager = make_manager()
-    for reading, expected in (("Present", "Healthy"), ("State Asserted", "Warning"),
-                              ("State Deasserted", "No fault reported")):
+    for reading, expected in (("Present", "OK"), ("State Asserted", "Warning"),
+                              ("State Deasserted", "OK")):
         assert manager.parse_battery_status(f"Cell | 0Fh | ok | 40.1 | {reading}")[0]["health"] == expected
     assert manager.parse_battery_status("Cell | 0Fh | ns | 40.1 | Present")[0]["health"] == "Unknown"
 
@@ -432,3 +432,41 @@ def test_dell_total_power_and_headroom_do_not_depend_on_sensor_labels(monkeypatc
     assert values == {"instantaneous_watts": 83, "headroom_watts": 817, "peak_headroom_watts": 800, "current_amps": 0.7, "capacity_watts": 900}
     assert run.call_args_list == [call(["0x30", "0xb3", "0x0a", "0x00"], timeout=3),
                                  call(["0x30", "0xbb"], timeout=3)]
+
+
+T430_BATTERIES = """CMOS Battery     | 65h | ok | 7.1  |
+ROMB Battery     | 68h | ok | 11.1 |
+ROMB Battery     | 69h | ns | 11.2 | Disabled
+"""
+
+
+def test_t430_disabled_romb_slot_cannot_overwrite_active_battery():
+    for rows in (T430_BATTERIES, "\n".join(reversed(T430_BATTERIES.splitlines()))):
+        batteries = make_manager().parse_battery_status(rows)
+        assert batteries == [
+            {"name": "CMOS Battery", "health": "OK", "voltage": None},
+            {"name": "ROMB Battery", "health": "OK", "voltage": None},
+        ]
+
+
+def test_duplicate_battery_names_keep_faults_and_stable_identities():
+    manager = make_manager()
+    first = "ROMB Battery | 68h | ok | 11.1 | Presence Detected"
+    second = "ROMB Battery | 69h | cr | 11.2 | Failed"
+    readings = manager.parse_battery_status(second + "\n" + first)
+    assert readings == [
+        {"name": "ROMB Battery", "health": "OK", "voltage": None},
+        {"name": "ROMB Battery (11.2, 69h)", "health": "Failed", "voltage": None},
+    ]
+    # A missing primary must not rename the second battery to the legacy ID.
+    assert manager.parse_battery_status(second) == [readings[1]]
+    assert manager.parse_battery_status(first.replace("Presence Detected", "Disabled").replace("ok", "ns") + "\n" + second) == [readings[1]]
+
+
+def test_disabled_battery_slots_are_omitted_but_failed_reads_stay_unknown():
+    manager = make_manager()
+    assert manager.parse_battery_status("ROMB Battery | 69h | ns | 11.2 | Disabled") == []
+    assert manager.parse_battery_status("ROMB Battery | 69h | ns | 11.2 | No Reading") == [
+        {"name": "ROMB Battery", "health": "Unknown", "voltage": None},
+    ]
+    assert manager.parse_battery_status("ROMB Battery | 69h | cr | 11.2 | Failed")[0]["health"] == "Failed"

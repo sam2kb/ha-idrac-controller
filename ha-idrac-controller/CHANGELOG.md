@@ -1,3 +1,13 @@
+## 1.0.13 - 2026-10-19
+
+- Fix same-named battery sensors overwriting each other. Ignore disabled spare
+  slots during initial discovery, retain separate identities for additional
+  batteries, and keep unreadable readings Unknown.
+- Use OK for readable battery sensors without a reported fault.
+- Log monitor-only cooling at startup instead of repeating it on every poll.
+- Shorten both READMEs, add navigation, and move detailed sensor/cooling notes
+  into a linked technical reference.
+
 ## 1.0.12 - 2026-10-19
 
 - Add a per-server Include advanced diagnostics switch, off by default for new
