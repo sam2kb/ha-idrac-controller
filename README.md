@@ -20,6 +20,8 @@ Select a screenshot to view it full size.
 
 ## Install
 
+[![Add repository to Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fsam2kb%2Fha-idrac-controller)
+
 You need iDRAC 7/8 with IPMI over LAN enabled, an iDRAC Administrator account,
 network access from Home Assistant to UDP 623, and an MQTT broker such as Mosquitto.
 iDRAC 9 and newer are outside this app's scope.
@@ -87,6 +89,21 @@ python -m pytest -q
 Tests block external subprocess/network calls and need no server or broker.
 GitHub Actions runs Python 3.14 and the Node UI tests on each push. Parser
 fixtures cover iDRAC 7/8 variants. We have not tested every model and firmware on hardware.
+
+### Container releases
+
+The Publish container images workflow builds and signs native amd64 and aarch64
+images, then checks startup, IPMI tooling, health and the dashboard without
+network access. The shared version tag is published only after both pass.
+Images live at `ghcr.io/sam2kb/ha-idrac-controller:<version>`.
+
+For a new release, prepare its version on a branch and run the workflow there
+with Run workflow. Verify the image is public and both architectures passed
+before merging the version into main and creating its matching `v<version>` tag.
+Tag builds also run the workflow; existing version tags are kept intact.
+Home Assistant uses the version in `config.yaml`; registry credentials are not
+needed for public images. On the first publication, set the GitHub package's
+visibility to Public in its package settings.
 
 ## Credits
 

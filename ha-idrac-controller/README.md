@@ -18,6 +18,8 @@ Select a screenshot to view it full size.
 
 ## Install
 
+[![Add repository to Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fsam2kb%2Fha-idrac-controller)
+
 Requirements:
 
 - Dell PowerEdge with iDRAC 7 or 8, such as R720, R630, R730 or T430.
