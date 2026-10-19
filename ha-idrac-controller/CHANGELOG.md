@@ -1,3 +1,8 @@
+## 1.0.2 - 2026-10-19
+
+- Add an app icon and logo for the Home Assistant app store.
+- Rename `changelog.md` to `CHANGELOG.md`, the name the app store reads.
+
 ## 1.0.1 - 2026-10-19
 
 - Move the app image to Python 3.14, the version current Home Assistant runs
