@@ -78,19 +78,42 @@ Firmware, installed hardware, privileges, and licensing determine which optional
 measurements are available. Parser tests cover iDRAC 7/8 output variants; they do
 not establish that every model and firmware version has been tested on hardware.
 
-Available SDR readings also appear as MQTT diagnostic sensors and in the
-dashboard's Additional Sensor Readings table. This includes voltage, current,
-other temperatures, and discrete status messages. Existing CPU, inlet/exhaust,
-fan RPM, and total-power readings keep their entity IDs and are not duplicated.
-New entities require an actual reading: blank, unset, unreadable, opaque raw
-codes, and non-finite values are skipped. Zero is a valid reading. If a reading
-later disappears, its entity becomes unavailable and keeps its history.
+### Sensor visibility
 
-Additional sensor IDs use the IPMI sensor number and entity ID, so identical
-labels remain distinct. Sensor attributes include the source, IPMI status,
-entity ID, and sensor number. Decoded Dell instantaneous power, current, and
-instantaneous/peak headroom are also exposed when available; reserved fields
-are excluded. No extra per-sensor polling is needed.
+Important readings are enabled by default. For extra detail, open Manage Servers,
+edit the server, set Include advanced diagnostics to On, and choose Save and
+reload app. The switch applies to both Home Assistant MQTT entities and the web
+dashboard. It defaults to Off for new and existing servers.
+
+| Always included when reported | Advanced diagnostics adds |
+| --- | --- |
+| CPU and other temperatures, fan RPM, cooling mode | Voltage/current readings and battery voltage |
+| Total power and capacity used | Capacity reference, warning/failure thresholds, detailed Dell power/current/headroom |
+| Battery health, PSU faults, intrusion | Additional presence messages and generic signal states |
+| Redundancy and clearly named hardware alarms | Other available diagnostic readings |
+
+Hardware threshold status stays enabled with the switch off. It reports Warning
+or Critical for readable threshold alarms, with the affected readings in its
+alerts attribute. No alerts means no readable threshold alarms were reported;
+PSU, battery, intrusion, and digital alarm statuses remain separate. A failed
+full-SDR read makes this summary unknown.
+
+Advanced readings are lightly filtered: blank, unset, unreadable, opaque raw
+codes, and non-finite values are omitted. Zero is a valid measurement. Generic
+State Asserted/State Deasserted signals display Active/Inactive, with the original
+text in the raw_reading attribute. Those words describe the signal and do not
+establish whether the hardware is healthy.
+
+Additional sensor IDs use the IPMI sensor number and entity ID. Existing core
+numeric entities are reused. Turning the switch off removes this server's
+optional discovery entries, including retained entries from earlier versions;
+turning it on rediscovers available readings with the same identifiers. Missing
+enabled readings become unavailable. The app checks its own device identity
+before changing discovery entries and ignores other devices' payloads.
+
+These readings use the existing SDR and Dell power polls. Reserved Dell fields
+are excluded. A custom MQTT ACL must allow subscribing to sensor discovery
+messages for cleanup of previously published optional entities.
 
 System Board Intrusion is an MQTT tamper sensor for alerts. On means intrusion
 is asserted; off means clear. Missing readings make the sensor unavailable.

@@ -215,6 +215,7 @@ def add_server():
         "idrac_username": request.form.get('idrac_username') or "root",
         "idrac_password": request.form.get('idrac_password') or "",
         "enabled": True,
+        "include_advanced_diagnostics": request.form.get("include_advanced_diagnostics") == "true",
         "fan_control_enabled": request.form.get('fan_control_enabled', 'true') == 'true',
         "disable_pcie_cooling_response": request.form.get('disable_pcie_cooling_response') == 'true',
         "fan_mode": fan_mode,
@@ -271,6 +272,7 @@ def update_server(alias):
     new_password = request.form.get('idrac_password')
     if new_password:
         server_to_update['idrac_password'] = new_password
+    server_to_update["include_advanced_diagnostics"] = request.form.get("include_advanced_diagnostics") == "true"
     server_to_update['enabled'] = request.form.get('enabled') == 'true'
     server_to_update['fan_control_enabled'] = request.form.get('fan_control_enabled') == 'true'
     server_to_update['disable_pcie_cooling_response'] = request.form.get('disable_pcie_cooling_response') == 'true'

@@ -159,7 +159,8 @@ def test_shutdown_handler_is_ready_before_connect_and_dispatches_only_press(make
     item.mqtt.connect.side_effect = connect
     item._initialize()
     topic = f"{item.mqtt.base_topic}/command/shutdown"
-    item.mqtt.subscribe.assert_called_once_with(topic)
+    assert [call.args[0] for call in item.mqtt.subscribe.call_args_list
+            if "/command/" in call.args[0]] == [topic]
     assert not item.discovered_sensors
     item.mqtt._on_message(None, None, SimpleNamespace(topic=topic + "/other", payload=b"PRESS"))
     item.mqtt._on_message(None, None, SimpleNamespace(topic=topic, payload=b"other"))
@@ -303,7 +304,7 @@ def test_power_actions_require_boolean_true_not_truthy_config(make_worker, value
     item = make_worker(**{action["option"]: value for action in main.POWER_ACTIONS.values()})
     item._initialize()
     item._on_mqtt_connected()
-    item.mqtt.subscribe.assert_not_called()
+    assert not any("/command/" in call.args[0] for call in item.mqtt.subscribe.call_args_list)
     for action in main.POWER_ACTIONS:
         item._on_mqtt_message(f"{item.mqtt.base_topic}/command/{action}", "PRESS")
     item.ipmi.chassis_shutdown.assert_not_called()
@@ -325,7 +326,8 @@ def test_only_allowed_power_action_is_discovered_subscribed_and_dispatched(make_
     item._initialize()
     item._on_mqtt_connected()
     topic = f"{item.mqtt.base_topic}/command/{action}"
-    item.mqtt.subscribe.assert_called_once_with(topic)
+    assert [call.args[0] for call in item.mqtt.subscribe.call_args_list
+            if "/command/" in call.args[0]] == [topic]
     configs = [json.loads(call.args[1]) for call in item.mqtt.publish.call_args_list
                if call.args[0].startswith("homeassistant/button/") and call.args[1]]
     assert len(configs) == 1
@@ -355,7 +357,7 @@ def test_reconnect_removes_legacy_button_even_when_telemetry_fails(make_worker):
     calls = [call for call in item.mqtt.publish.call_args_list if call.args[0] == legacy]
     assert len(calls) == 2
     assert all(call.args[1] == "" and call.kwargs["retain"] is True for call in calls)
-    item.mqtt.subscribe.assert_not_called()
+    assert not any("/command/" in call.args[0] for call in item.mqtt.subscribe.call_args_list)
     item.ipmi.chassis_shutdown.assert_not_called()
 
 
@@ -435,7 +437,7 @@ def test_cpu_labels_change_without_changing_unique_ids_or_socket_assignment(make
 
 def test_battery_discovery_is_optional_and_failed_reads_clear_stale_health(make_worker):
     import json
-    item = make_worker()
+    item = make_worker(include_advanced_diagnostics=True)
     item._initialize()
     del item._publish_mqtt_data
     item.mqtt.is_connected = True
@@ -487,7 +489,7 @@ System Peak Headroom : 800 W
 
 def test_power_capacity_uses_headroom_not_thresholds_and_publishes_separate_sensors(make_worker):
     import json
-    item = make_worker()
+    item = make_worker(include_advanced_diagnostics=True)
     item._initialize()
     del item._publish_mqtt_data
     item.mqtt.is_connected = True
@@ -628,7 +630,7 @@ def test_worker_reads_total_power_with_unfamiliar_sdr_labels(make_worker):
 
 def test_all_available_extra_readings_publish_and_failures_clear_availability(make_worker):
     import json
-    item = make_worker(fan_control_enabled=False)
+    item = make_worker(fan_control_enabled=False, include_advanced_diagnostics=True)
     rows = "DIMM Temp | 20h | ok | 32.1 | 40 degrees C\nPS1 Voltage | 21h | ok | 10.1 | 0 Volts\nPS1 Current | 22h | ok | 10.1 | 0.1 Amps\nPS1 Status | 23h | ok | 10.1 | Power Supply AC lost\nUnused | 24h | ns | 7.1 | No Reading"
     item._initialize()
     del item._publish_mqtt_data
@@ -644,7 +646,7 @@ def test_all_available_extra_readings_publish_and_failures_clear_availability(ma
     assert config["json_attributes_topic"] == f"{item.mqtt.base_topic}/sensor/ipmi_21_10_1"
     state = json.loads(payloads[config["state_topic"]])
     assert state["state"] == 0
-    assert state["attributes"] == {"ipmi_status": "ok", "entity": "10.1", "sensor_number": "0x21", "source": "IPMI SDR"}
+    assert state["attributes"] == {"ipmi_status": "ok", "entity": "10.1", "sensor_number": "0x21", "source": "IPMI SDR", "diagnostic_tier": "advanced"}
     assert not any("ipmi_24_" in topic for topic in payloads)
     item.mqtt.publish.reset_mock()
     item._update_status({"cpu_temps": [35]}, [], 70, [], "Monitor only")
@@ -658,7 +660,7 @@ def test_all_available_extra_readings_publish_and_failures_clear_availability(ma
 
 
 def test_additional_discovery_reuses_core_readings_and_only_exposes_decoded_oem_fields(make_worker):
-    item = make_worker()
+    item = make_worker(include_advanced_diagnostics=True)
     data = "CPU1 Temp | 01h | ok | 3.1 | 35 degrees C\nInlet Temp | 02h | ok | 7.1 | 24 degrees C\nFan1 | 03h | ok | 7.1 | 1440 RPM\nPwr Consumption | 77h | ok | 7.1 | 70 Watts\nDIMM Temp | 20h | ok | 32.1 | 40 degrees C"
     assert [reading["name"] for reading in item._additional_readings(data)] == ["DIMM Temp"]
     item._power_details = {"instantaneous_watts": 83, "current_amps": 0.7, "headroom_watts": 817, "peak_headroom_watts": 800}
@@ -669,7 +671,7 @@ def test_additional_discovery_reuses_core_readings_and_only_exposes_decoded_oem_
 
 def test_long_discrete_readings_preserve_full_text_in_attributes(make_worker):
     import json
-    item = make_worker()
+    item = make_worker(include_advanced_diagnostics=True)
     item._initialize()
     del item._publish_mqtt_data
     item.mqtt.is_connected = True
@@ -680,3 +682,104 @@ def test_long_discrete_readings_preserve_full_text_in_attributes(make_worker):
     state = json.loads(payloads[f"{item.mqtt.base_topic}/sensor/ipmi_21_7_1"])
     assert len(state["state"]) == 255
     assert state["attributes"]["full_reading"] == text.strip()
+
+
+CURATED_ROWS = """DIMM Temp | 20h | ok | 32.1 | 40 degrees C
+PS Redundancy | 21h | ok | 7.1 | Fully Redundant
+CPU1 IERR | 22h | ok | 3.1 | State Deasserted
+CPU1 VCORE PG | 23h | ok | 3.1 | State Deasserted
+PS1 Voltage | 24h | ok | 10.1 | 120 Volts
+PS1 Status | 25h | ok | 10.1 | Presence detected
+"""
+
+
+@pytest.mark.parametrize("setting", [None, False, "true", "false", 1])
+def test_important_readings_default_on_and_advanced_requires_explicit_boolean(make_worker, setting):
+    item = make_worker(include_advanced_diagnostics=setting)
+    readings = item._additional_readings(CURATED_ROWS)
+    assert [reading["name"] for reading in readings] == ["DIMM Temp", "PS Redundancy", "CPU1 IERR"]
+    assert readings[-1]["value"] == "Inactive"
+    assert readings[-1]["raw_reading"] == "State Deasserted"
+    assert all(reading["diagnostic_tier"] == "important" for reading in readings)
+    active = item._additional_readings(CURATED_ROWS.replace("State Deasserted", "State Asserted"))
+    assert [reading["slug"] for reading in active] == [reading["slug"] for reading in readings]
+    assert active[-1]["value"] == "Active"
+
+
+def test_advanced_opt_in_preserves_important_readings_and_restores_stable_ids(make_worker):
+    basic = make_worker()
+    full = make_worker(include_advanced_diagnostics=True)
+    basic_readings = basic._additional_readings(CURATED_ROWS)
+    full_readings = full._additional_readings(CURATED_ROWS)
+    assert len(full_readings) == 6
+    assert {reading["slug"] for reading in basic_readings} < {reading["slug"] for reading in full_readings}
+    assert next(reading for reading in full_readings if reading["name"] == "CPU1 VCORE PG")["value"] == "Inactive"
+
+
+def test_reconcile_off_removes_only_advanced_extra_discovery_even_without_current_reading(make_worker):
+    item = make_worker()
+    item._initialize()
+    item.mqtt.publish.reset_mock()
+    # A retained record can outlive its hardware or current SDR reading.
+    item._reconcile_extra_discovery("ipmi_24_10_1", {"name": "PS1 Voltage", "device_class": "voltage"})
+    item._reconcile_extra_discovery("dell_peak_headroom", {"name": "Peak power headroom", "device_class": "power"})
+    item._reconcile_extra_discovery("ipmi_20_32_1", {"name": "DIMM Temp", "device_class": "temperature"})
+    item._reconcile_extra_discovery("ipmi_22_3_1", {"name": "CPU1 IERR"})
+    removed = [call.args[0] for call in item.mqtt.publish.call_args_list if call.args[1] == ""]
+    assert removed == ["homeassistant/sensor/idrac_controller_fixture_ipmi_24_10_1/config",
+                       "homeassistant/sensor/idrac_controller_fixture_dell_peak_headroom/config"]
+    item.config["include_advanced_diagnostics"] = True
+    item.mqtt.publish.reset_mock()
+    item._reconcile_extra_discovery("ipmi_24_10_1", {"name": "PS1 Voltage", "device_class": "voltage"})
+    item.mqtt.publish.assert_not_called()
+
+
+def test_advanced_setting_does_not_enable_server_power_or_control_fans(make_worker):
+    for setting in (False, True):
+        item = make_worker(fan_control_enabled=False, include_advanced_diagnostics=setting)
+        item.ipmi.retrieve_power_sdr_raw.return_value = CURATED_ROWS
+        run_cycles(item)
+        item.ipmi.apply_user_fan_control_profile.assert_not_called()
+        item.ipmi.apply_dell_fan_control_profile.assert_not_called()
+        item.ipmi.chassis_shutdown.assert_not_called()
+        item.ipmi.chassis_power_on.assert_not_called()
+
+
+def test_default_threshold_summary_does_not_hide_abnormal_advanced_measurements(make_worker):
+    import json
+    item = make_worker()
+    item._initialize()
+    del item._publish_mqtt_data
+    item.mqtt.is_connected = True
+    for status, expected in (("lcr", "Critical"), ("lnc", "Warning"), ("ok", "No alerts")):
+        readings = item._additional_readings(f"CPU VCORE | 24h | {status} | 3.1 | 0 Volts")
+        assert readings == []  # The raw voltage is optional, not the alert summary.
+        item._update_status({"cpu_temps": [35]}, [], 70, [], "Monitor only", readings=readings)
+        payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+        summary = json.loads(payloads[f"{item.mqtt.base_topic}/sensor/sensor_threshold_status"])
+        assert summary["state"] == expected
+        assert len(summary["attributes"]["alerts"]) == (0 if status == "ok" else 1)
+    item._update_status({"cpu_temps": []}, [], None, [], "Monitor only")
+    payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+    assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/sensor_threshold_status"])["state"] is None
+
+
+def test_advanced_off_keeps_core_health_and_load_but_not_auxiliary_metadata(make_worker):
+    import json
+    item = make_worker()
+    item._initialize()
+    del item._publish_mqtt_data
+    item.mqtt.is_connected = True
+    item._power_details = item.ipmi.parse_power_details(POWER_DETAILS)
+    item._update_status({"cpu_temps": [35]}, [], 70, [{"name": "PSU1", "ok": True}], "Monitor only",
+                        batteries=[{"name": "CMOS Battery", "health": "Healthy", "voltage": 3.1}], intrusion={"active": False})
+    payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+    assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/power_capacity_percent"])["state"] == 7.78
+    assert payloads[f"{item.mqtt.base_topic}/binary_sensor/psu_psu1"] == "OFF"
+    assert payloads[f"{item.mqtt.base_topic}/binary_sensor/system_board_intrusion"] == "OFF"
+    assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/battery_cmos_battery_health"])["state"] == "Healthy"
+    for slug in ("power_capacity_watts", "power_warning_watts", "power_failure_watts", "battery_cmos_battery_voltage"):
+        assert f"homeassistant/sensor/idrac_controller_fixture_{slug}/config" not in payloads
+        item._reconcile_extra_discovery(slug, {"name": slug, "device_class": "power"})
+    tombstones = [call.args[0] for call in item.mqtt.publish.call_args_list if call.args[1] == ""]
+    assert len(tombstones) == 4

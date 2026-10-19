@@ -95,3 +95,50 @@ def test_power_availability_does_not_depend_on_cpu_temperatures():
     sensor = json.loads(captured[-1][1])
     assert [item["topic"] for item in sensor["availability"]] == [client.availability_topic, client.connection_topic]
     assert sensor["availability_mode"] == "all"
+
+
+def extra_config(client, slug="ipmi_21_10_1"):
+    device_id = client.device_info_dict["identifiers"][0]
+    return f"homeassistant/sensor/{device_id}_{slug}/config", {
+        "name": "PS1 Voltage", "unique_id": f"{device_id}_{slug}",
+        "device": client.device_info_dict, "origin": {"name": "HA iDRAC Controller"},
+        "device_class": "voltage",
+    }
+
+
+def test_retained_discovery_is_checked_separately_from_power_commands():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    client, captured = make_client()
+    client.subscribe = Mock()
+    callback = Mock()
+    client.message_callback = Mock()
+    client.watch_extra_discovery(callback)
+    client.subscribe.assert_called_once_with("homeassistant/sensor/+/config")
+    topic, payload = extra_config(client)
+    client._on_message(None, None, SimpleNamespace(topic=topic, payload=json.dumps(payload).encode(), retain=True))
+    callback.assert_called_once_with("ipmi_21_10_1", payload)
+    client.message_callback.assert_not_called()
+    callback.reset_mock()
+    client._on_message(None, None, SimpleNamespace(topic=topic, payload=b"", retain=True))
+    callback.assert_not_called()  # Own tombstone cannot trigger a removal loop.
+
+
+def test_reconciliation_ignores_foreign_core_and_malformed_discovery_before_callback():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    client, captured = make_client()
+    client.discovery_callback = Mock()
+    topic, payload = extra_config(client)
+    cases = [
+        (topic.replace("T430", "other"), b"not-json"),
+        (topic.replace("ipmi_21_10_1", "cpu_0_temp"), json.dumps(payload).encode()),
+        (topic, b"not-json"), (topic, b"[]"), (topic, b"\xff"),
+        (topic, json.dumps({**payload, "unique_id": "other"}).encode()),
+        (topic, json.dumps({**payload, "device": {"identifiers": ["other"]}}).encode()),
+        (topic, json.dumps({**payload, "origin": {"name": "Other publisher"}}).encode()),
+        (topic, b"x" * 65537),
+    ]
+    for candidate, body in cases:
+        client._on_message(None, None, SimpleNamespace(topic=candidate, payload=body, retain=True))
+    client.discovery_callback.assert_not_called()

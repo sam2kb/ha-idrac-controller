@@ -11,7 +11,7 @@ from .ipmi_manager import IPMIManager
 from .mqtt_client import MqttClient
 from .mqtt_config import resolve_mqtt_config
 from .power_control import POWER_ACTIONS
-from .sensor_readings import parse_sdr_readings
+from .sensor_readings import parse_sdr_readings, is_important_reading, is_advanced_core_slug
 from .pid_controller import PIDController
 from . import web_server
 
@@ -60,6 +60,8 @@ class ServerWorker:
         self._known_batteries = {}
         self._known_psus = {}
         self._known_readings = {}
+        self._threshold_status = None
+        self._threshold_alerts = []
         self._reading_metadata = {}
         self._next_sensor_inventory = 0.0
         self._sensor_inventory_index = 0
@@ -110,6 +112,8 @@ class ServerWorker:
         self._log("info", "MQTT connected; refreshing discovery and power permissions.")
         self.discovered_sensors.clear()
         self._reading_metadata.clear()
+        if self.config.get("include_advanced_diagnostics") is not True:
+            self.mqtt.watch_extra_discovery(self._reconcile_extra_discovery)
         for slug in self._known_readings:
             self.mqtt.publish(f"{self.mqtt.base_topic}/reading/{slug}/availability", "offline", retain=True)
         self.mqtt.publish(f"{self.mqtt.base_topic}/intrusion/availability", "offline", retain=True)
@@ -366,10 +370,25 @@ class ServerWorker:
             details["reading_watts"] = reading
         self._power_details = details
 
+    def _reconcile_extra_discovery(self, slug, metadata):
+        """Remove only this device's optional extras when the switch is off."""
+        if self.config.get("include_advanced_diagnostics") is True:
+            return
+        if not is_important_reading({"slug": slug, "name": metadata["name"],
+                                     "device_class": metadata.get("device_class")}):
+            self.mqtt.remove_discovery("sensor", slug)
+            self.mqtt.publish(f"{self.mqtt.base_topic}/reading/{slug}/availability", "offline", retain=True)
+
     def _additional_readings(self, sdr_data, temperature_data=None, fan_data=None):
         # Full SDR is preferred when a record also appears in a typed query.
         data = "\n".join(part for part in (temperature_data, fan_data, sdr_data) if part)
         power_name = self.ipmi.get_power_sensor_name(sdr_data)
+        current = parse_sdr_readings(sdr_data)
+        self._threshold_alerts = [{key: item[key] for key in ("name", "status", "value", "unit")}
+                                  for item in current if item["status"] != "ok"]
+        critical = {"cr", "nr", "lcr", "lnr", "ucr", "unr"}
+        self._threshold_status = ("Critical" if any(item["status"] in critical for item in self._threshold_alerts)
+                                  else "Warning" if self._threshold_alerts else "No alerts") if current else None
         readings = []
         for reading in parse_sdr_readings(data):
             row = reading.pop("source_row")
@@ -397,6 +416,10 @@ class ServerWorker:
                 readings.append({"slug": slug, "name": name, "value": value, "unit": unit,
                                  "device_class": device_class, "state_class": "measurement",
                                  "status": "ok", "source": "Dell OEM", "entity": None, "sensor_number": None})
+        for reading in readings:
+            reading["diagnostic_tier"] = "important" if is_important_reading(reading) else "advanced"
+        if self.config.get("include_advanced_diagnostics") is not True:
+            readings = [reading for reading in readings if reading["diagnostic_tier"] == "important"]
         return readings
 
     def _update_status(self, temps, fans, power, psu_statuses, target_fan_speed, batteries=None, intrusion=None, readings=None):
@@ -409,6 +432,7 @@ class ServerWorker:
         self._known_psus = {name: {"name": name, "ok": None} for name in self._known_psus}
         self._known_psus.update({psu["name"]: psu for psu in psu_statuses})
         psu_statuses = list(self._known_psus.values())
+        has_current_readings = readings is not None
         self._known_readings = {slug: {**item, "value": None} for slug, item in self._known_readings.items()}
         self._known_readings.update({item["slug"]: item for item in (readings or [])})
         readings = list(self._known_readings.values())
@@ -419,6 +443,8 @@ class ServerWorker:
         hottest_cpu = max(temps['cpu_temps']) if temps['cpu_temps'] else None
         status_data = {
             "hottest_cpu_temp": hottest_cpu,
+            "sensor_threshold_status": self._threshold_status if has_current_readings else None,
+            "sensor_threshold_alerts": self._threshold_alerts if has_current_readings else [],
             "inlet_temp": temps.get('inlet_temp'),
             "exhaust_temp": temps.get('exhaust_temp'),
             "power": power,
@@ -434,6 +460,7 @@ class ServerWorker:
             "cpu_ids": cpu_ids,
             "batteries": batteries,
             "sensor_readings": readings,
+            "include_advanced_diagnostics": self.config.get("include_advanced_diagnostics") is True,
             "fans": fans,
             "psus": psu_statuses,
         }
@@ -443,6 +470,8 @@ class ServerWorker:
                 "ip": self.config['idrac_ip'],
                 "last_updated": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
                 "hottest_cpu_temp_c": hottest_cpu,
+                "sensor_threshold_status": status_data["sensor_threshold_status"],
+                "sensor_threshold_alerts": status_data["sensor_threshold_alerts"],
                 "inlet_temp_c": temps.get('inlet_temp'),
                 "exhaust_temp_c": temps.get('exhaust_temp'),
                 "power_consumption_watts": power,
@@ -457,6 +486,7 @@ class ServerWorker:
                 "cpu_ids": cpu_ids,
                 "batteries": batteries,
                 "sensor_readings": readings,
+                "include_advanced_diagnostics": self.config.get("include_advanced_diagnostics") is True,
                 "actual_fan_rpms": fans,
                 "psu_statuses": psu_statuses,
             }
@@ -474,6 +504,7 @@ class ServerWorker:
             return
 
         sensors = {
+            "sensor_threshold_status": {"component": "sensor", "name": "Hardware threshold status", "entity_category": "diagnostic", "icon": "mdi:alert-circle-outline", "include_attributes": True},
             "cooling_mode": {"component": "sensor", "name": "Cooling status", "entity_category": "diagnostic"},
             "hottest_cpu_temp": {"component": "sensor", "device_class": "temperature", "unit": "°C", "state_class": "measurement", "suggested_display_precision": 1},
             "inlet_temp": {"component": "sensor", "device_class": "temperature", "unit": "°C", "state_class": "measurement", "suggested_display_precision": 1},
@@ -521,6 +552,9 @@ class ServerWorker:
         for psu in status.get('psus', []):
             sensors[f"psu_{re.sub(r'[^a-zA-Z0-9_]+', '', psu['name']).lower()}"] = {"component": "binary_sensor", "name": psu['name'], "device_class": "problem", "entity_category": "diagnostic", "extra_availability_topic": f"{self.mqtt.base_topic}/psu/{psu['name']}/availability"}
 
+        if self.config.get("include_advanced_diagnostics") is not True:
+            sensors = {slug: desc for slug, desc in sensors.items() if not is_advanced_core_slug(slug)}
+
         for slug, desc in sensors.items():
             if slug not in self.discovered_sensors:
                 self.mqtt.publish_discovery(
@@ -534,6 +568,7 @@ class ServerWorker:
                     entity_category=desc.get('entity_category'),
                     suggested_display_precision=desc.get('suggested_display_precision'),
                     extra_availability_topic=desc.get("extra_availability_topic"),
+                    include_attributes=desc.get("include_attributes", False),
                 )
                 self.discovered_sensors.add(slug)
 
@@ -549,7 +584,10 @@ class ServerWorker:
                     value = cpu_values.get(index)
                 else:
                     value = status.get(slug)
-                self.mqtt.publish_state('sensor', slug, value)
+                if slug == "sensor_threshold_status":
+                    self.mqtt.publish_state("sensor", slug, value, {"attributes": {"alerts": status.get("sensor_threshold_alerts", [])}})
+                else:
+                    self.mqtt.publish_state('sensor', slug, value)
             elif slug == "system_board_intrusion":
                 active = status.get("intrusion_active")
                 self.mqtt.publish(desc["extra_availability_topic"], "online" if active is not None else "offline", retain=True)
@@ -581,6 +619,9 @@ class ServerWorker:
             if available:
                 attributes = {"ipmi_status": reading["status"], "entity": reading["entity"],
                               "sensor_number": reading["sensor_number"], "source": reading.get("source", "IPMI SDR")}
+                if reading.get("raw_reading"):
+                    attributes["raw_reading"] = reading["raw_reading"]
+                attributes["diagnostic_tier"] = reading.get("diagnostic_tier", "advanced")
                 value = reading["value"]
                 if isinstance(value, str) and len(value) > 255:
                     attributes["full_reading"] = value

@@ -102,6 +102,7 @@
                 </div>
 
                 <hr>
+                {% include "_diagnostics_controls.html" %}
                 {% include "_power_controls.html" %}
                 <div class="form-actions"><button type="submit" name="action" value="save">Save</button>
                     <button type="submit" name="action" value="save_reload" {% if not can_reload %}disabled title="Available when running as a Home Assistant app"{% endif %}>Save and reload app</button></div>

@@ -1,7 +1,7 @@
 # HA iDRAC Controller/config.yaml
 
 name: "HA iDRAC Controller"
-version: "1.0.11"
+version: "1.0.12"
 slug: "ha_idrac_controller"
 description: "Monitor and control Dell PowerEdge servers through iDRAC over IPMI."
 url: "https://github.com/sam2kb/ha-idrac-controller"

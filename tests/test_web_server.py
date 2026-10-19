@@ -362,7 +362,7 @@ def test_dashboard_labels_cpu_sockets_and_shows_reported_battery_health(web, mon
         "alias": "fixture", "ip": "127.0.0.1", "last_updated": "fixture",
         "hottest_cpu_temp_c": 35, "inlet_temp_c": 24, "exhaust_temp_c": None,
         "power_consumption_watts": 70, "target_fan_speed_percent": "Dell Auto",
-        "power_capacity_percent": 7.78, "power_capacity_watts": 900,
+        "include_advanced_diagnostics": True, "power_capacity_percent": 7.78, "power_capacity_watts": 900,
         "power_warning_watts": 896, "power_failure_watts": 980,
         "intrusion_seen": True, "intrusion_active": False,
         "cpu_temps_c": [35, 32], "cpu_ids": [1, 2], "actual_fan_rpms": [],
@@ -396,3 +396,28 @@ def test_dashboard_shows_available_additional_readings_and_escapes_labels(web, m
     assert b"PS1 Voltage &lt;test&gt;" in page.data and b"0 V" in page.data
     assert b"AC lost" in page.data
     assert b"Hidden absent reading" not in page.data
+
+
+@pytest.mark.parametrize("path", ["/servers", "/servers/edit/fixture"])
+def test_advanced_diagnostics_is_off_by_default_without_modifying_saved_legacy_config(web, path):
+    client, config_path = web
+    before = config_path.read_bytes()
+    page = client.get(path)
+    text = page.get_data(as_text=True)
+    assert '<option value="false" selected>Off — important readings only' in text
+    assert "Include advanced diagnostics" in text
+    assert config_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("path", ["/servers/add", "/servers/update/fixture"])
+@pytest.mark.parametrize("setting,expected", [(None, False), ("false", False), ("true", True), ("1", False)])
+def test_advanced_diagnostics_option_saves_independently_of_power_controls(web, path, setting, expected):
+    client, config_path = web
+    form = {"alias": "new", "fan_mode": "auto", "fan_control_enabled": "false"}
+    if setting is not None:
+        form["include_advanced_diagnostics"] = setting
+    assert client.post(path, data=form).status_code == 302
+    server = json.loads(config_path.read_text())[-1 if path.endswith("add") else 0]
+    assert server["include_advanced_diagnostics"] is expected
+    assert server["fan_control_enabled"] is False
+    assert all(server[key] is False for key in ("allow_power_on", "allow_shutdown", "allow_reboot", "allow_power_off", "allow_power_cycle"))

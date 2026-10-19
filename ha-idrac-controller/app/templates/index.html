@@ -18,13 +18,14 @@
                 <p><em>Last updated: <strong>{{ server.last_updated }}</strong></em></p>
 
                 <div class="status-grid">
+                    {% if server.sensor_threshold_status is defined %}<div><strong>Hardware threshold status:</strong> {{ server.sensor_threshold_status or "Unknown" }}</div>{% endif %}
                     <div><strong>Hottest CPU:</strong> {{ '%.1f'|format(server.hottest_cpu_temp_c) if server.hottest_cpu_temp_c is not none else 'N/A' }}°C</div>
                     <div><strong>Inlet Temp:</strong> {{ '%.1f'|format(server.inlet_temp_c) if server.inlet_temp_c is not none else 'N/A' }}°C</div>
                     <div><strong>Exhaust Temp:</strong> {{ '%.1f'|format(server.exhaust_temp_c) if server.exhaust_temp_c is not none else 'N/A' }}°C</div>
                     <div><strong>Power:</strong> {{ server.power_consumption_watts if server.power_consumption_watts is not none else 'N/A' }} W{% if server.power_capacity_percent is defined and server.power_capacity_percent is not none %} ({{ '%.2f'|format(server.power_capacity_percent) }}% Capacity){% endif %}</div>
-                    {% if server.power_capacity_watts is defined and server.power_capacity_watts is not none %}<div><strong>Capacity Reference:</strong> {{ server.power_capacity_watts }} W</div>{% endif %}
-                    {% if server.power_warning_watts is defined and server.power_warning_watts is not none %}<div><strong>Warning Threshold:</strong> {{ server.power_warning_watts }} W</div>{% endif %}
-                    {% if server.power_failure_watts is defined and server.power_failure_watts is not none %}<div><strong>Failure Threshold:</strong> {{ server.power_failure_watts }} W</div>{% endif %}
+                    {% if server.include_advanced_diagnostics and server.power_capacity_watts is defined and server.power_capacity_watts is not none %}<div><strong>Capacity Reference:</strong> {{ server.power_capacity_watts }} W</div>{% endif %}
+                    {% if server.include_advanced_diagnostics and server.power_warning_watts is defined and server.power_warning_watts is not none %}<div><strong>Warning Threshold:</strong> {{ server.power_warning_watts }} W</div>{% endif %}
+                    {% if server.include_advanced_diagnostics and server.power_failure_watts is defined and server.power_failure_watts is not none %}<div><strong>Failure Threshold:</strong> {{ server.power_failure_watts }} W</div>{% endif %}
                     {% if server.intrusion_seen %}<div><strong>System Board Intrusion:</strong> {{ 'Unknown' if server.intrusion_active is none else 'Detected' if server.intrusion_active else 'Clear' }}</div>{% endif %}
                     <div>
                         <strong>Target Fan Speed:</strong>
@@ -48,7 +49,7 @@
                 <h3>Battery Health</h3>
                 <ul>
                     {% for battery in server.batteries %}
-                    <li><strong>{{ battery.name }}:</strong> {{ battery.health }}{% if battery.voltage is not none %} ({{ battery.voltage }} V){% endif %}</li>
+                    <li><strong>{{ battery.name }}:</strong> {{ battery.health }}{% if server.include_advanced_diagnostics and battery.voltage is not none %} ({{ battery.voltage }} V){% endif %}</li>
                     {% endfor %}
                 </ul>
                 {% endif %}
@@ -65,7 +66,7 @@
                 {% endif %}
                 {% set available_readings = server.sensor_readings|default([])|rejectattr("value", "none")|list %}
                 {% if available_readings %}
-                <h3>Additional Sensor Readings</h3>
+                <h3>{{ "Additional Sensor Readings" if server.include_advanced_diagnostics else "Hardware Health Readings" }}</h3>
                 <div class="readings-scroll">
                     <table class="readings-table">
                         <thead><tr><th>Sensor</th><th>Reading</th><th>IPMI status</th></tr></thead>

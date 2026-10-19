@@ -15,6 +15,40 @@ UNITS = {
 UNAVAILABLE = {"", "na", "n/a", "none", "null", "unset", "unknown", "no reading",
                "not readable", "disabled", "not available", "not specified"}
 VALID_STATUS = {"ok", "nc", "cr", "nr", "lnc", "lcr", "lnr", "unc", "ucr", "unr"}
+GENERIC_SIGNAL_STATES = {"state asserted": "Active", "state deasserted": "Inactive"}
+
+
+ADVANCED_CORE_SLUGS = {"power_capacity_watts", "power_warning_watts", "power_failure_watts"}
+
+
+def is_advanced_core_slug(slug):
+    return slug in ADVANCED_CORE_SLUGS or bool(re.fullmatch(r"battery_[a-z0-9_]+_voltage", slug))
+
+
+def is_important_reading(reading):
+    """Keep stable temperature/redundancy/alarm identities in the default set.
+
+    Classify by metadata, not the current severity, so an alarm stays present
+    when it clears. PSU/battery/intrusion summaries already have core entities.
+    """
+    if is_advanced_core_slug(reading.get("slug", "")):
+        return False
+    if reading.get("device_class") == "temperature":
+        return True
+    name = re.sub(r"[_-]+", " ", reading.get("name", "")).lower()
+    entity = reading.get("entity")
+    if entity is None:
+        match = re.fullmatch(r"ipmi_[0-9a-f]{2}_(\d+)_\d+", reading.get("slug", ""))
+        entity = match.group(1) if match else ""
+    if "redundancy" in name:
+        return True
+    if str(entity).split(".")[0] == "10":
+        return False
+    if re.match(r"ps(?:u)?\d+\s+(?:status|pg fail)\b", name):
+        return False
+    return bool(re.search(r"redundancy|\b(?:fault|fail(?:ure)?|error|err|ierr|caterr)\b|\bthermal\s*trip\b", name))
+
+
 NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 
 
@@ -40,7 +74,7 @@ def parse_sdr_readings(data):
         if (status.lower() not in VALID_STATUS or raw.lower() in UNAVAILABLE
                 or re.fullmatch(r"(?:0x[0-9a-f]+|[0-9a-f]+h)", raw, re.IGNORECASE)):
             continue
-        value, unit, device_class, state_class = raw, None, None, None
+        value, unit, device_class, state_class = GENERIC_SIGNAL_STATES.get(raw.lower(), raw), None, None, None
         numeric = re.fullmatch(rf"({NUMBER})(?:\s+(.+))?", raw)
         if numeric:
             value = float(numeric.group(1))
@@ -59,6 +93,7 @@ def parse_sdr_readings(data):
             "entity": entity, "status": status.lower(), "value": value,
             "unit": unit, "device_class": device_class, "state_class": state_class,
             "source_row": row,
+            **({"raw_reading": raw} if raw.lower() in GENERIC_SIGNAL_STATES else {}),
         }
     names = [item["name"] for item in readings.values()]
     for item in readings.values():

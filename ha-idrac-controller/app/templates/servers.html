@@ -80,6 +80,7 @@
                     <input type="number" id="critical_temp_threshold" name="critical_temp_threshold" value="{{ defaults.critical_temp_threshold }}" min="0" max="100">
                 </div>
                 </div>
+                {% include "_diagnostics_controls.html" %}
                 {% include "_power_controls.html" %}
                 <div class="form-actions">
                     <button type="submit" name="action" value="save">Save</button>

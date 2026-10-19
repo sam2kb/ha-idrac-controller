@@ -50,3 +50,12 @@ def test_duplicate_labels_are_distinct_and_latest_unavailable_read_wins():
     assert len(parse_sdr_readings(rows + "\nVoltage | 0Ah | ns | 10.1 | No Reading")) == 1
     assert parse_sdr_readings(None) == []
     assert parse_sdr_readings("Voltage | 120 Volts | ok") == []
+
+
+@pytest.mark.parametrize("raw,display", [("State Deasserted", "Inactive"), ("STATE ASSERTED", "Active")])
+def test_generic_signal_states_do_not_claim_health(raw, display):
+    item = parse_sdr_readings(f"CPU1 VCORE PG | 0Ah | ok | 3.1 | {raw}")[0]
+    assert item["value"] == display
+    assert item["raw_reading"] == raw
+    assert item["device_class"] is None
+    assert item["state_class"] is None

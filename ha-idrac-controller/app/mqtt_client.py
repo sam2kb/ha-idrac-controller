@@ -22,6 +22,7 @@ class MqttClient:
         self.connection_topic = f"{self.base_topic}/connection"
         self.device_info_dict = None
         self.message_callback = None
+        self.discovery_callback = None
         self.on_connect_callback = None
         self._loop_started = False
 
@@ -84,6 +85,9 @@ class MqttClient:
         self.is_connected = False
 
     def _on_message(self, client, userdata, msg):
+        if msg.topic.startswith("homeassistant/sensor/"):
+            self._on_extra_discovery(msg)
+            return
         # Power commands must never replay when a subscription is restored.
         if getattr(msg, "retain", False):
             self._log("warning", "Ignored retained MQTT command.")
@@ -95,6 +99,44 @@ class MqttClient:
             return
         if self.message_callback:
             self.message_callback(msg.topic, payload)
+
+    def watch_extra_discovery(self, callback):
+        """Reconcile retained extras from old versions, including absent sensors.
+
+        MQTT wildcards cannot match a partial object-ID level. The receiver
+        checks our exact device namespace before decoding any payload.
+        """
+        self.discovery_callback = callback
+        self.subscribe("homeassistant/sensor/+/config")
+
+    def _on_extra_discovery(self, msg):
+        if not self.discovery_callback or not self.device_info_dict:
+            return
+        device_id = self.device_info_dict["identifiers"][0]
+        prefix = f"homeassistant/sensor/{device_id}_"
+        if not msg.topic.startswith(prefix) or not msg.topic.endswith("/config"):
+            return
+        slug = msg.topic[len(prefix):-len("/config")]
+        if not (re.fullmatch(r"ipmi_[0-9a-f]{2}_\d+_\d+", slug)
+                or re.fullmatch(r"battery_[a-z0-9_]+_voltage", slug) or slug in (
+            "dell_instantaneous_power", "dell_instantaneous_current",
+            "dell_instantaneous_headroom", "dell_peak_headroom",
+            "power_capacity_watts", "power_warning_watts", "power_failure_watts",
+        )) or not msg.payload or len(msg.payload) > 65536:
+            return
+        try:
+            payload = json.loads(msg.payload)
+            if (not isinstance(payload, dict) or payload.get("unique_id") != f"{device_id}_{slug}"
+                    or not isinstance(payload.get("name"), str)
+                    or not isinstance(payload.get("device"), dict)
+                    or payload["device"].get("identifiers") != [device_id]
+                    or not isinstance(payload.get("origin"), dict)
+                    or payload["origin"].get("name") != "HA iDRAC Controller"
+                    or payload.get("device_class") not in (None, "temperature", "voltage", "current", "power", "frequency", "duration")):
+                return
+        except (ValueError, UnicodeDecodeError, TypeError):
+            return
+        self.discovery_callback(slug, payload)
 
     def connect(self):
         # Once the network loop is running paho reconnects by itself; calling

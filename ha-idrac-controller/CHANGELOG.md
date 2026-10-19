@@ -1,3 +1,17 @@
+## 1.0.12 - 2026-10-19
+
+- Add a per-server Include advanced diagnostics switch, off by default for new
+  and existing servers, controlling both MQTT entities and the dashboard.
+- Keep core health/load readings, other temperatures, redundancy, named hardware
+  alarms, and a threshold-alert summary enabled. Put voltage/current readings,
+  battery voltage, detailed power metadata, and other signals behind the switch.
+- Reconcile retained discovery entries when the switch is off, removing only
+  this app's optional entities for the selected device. Keep stable identifiers
+  when available readings are enabled again.
+- Show generic asserted/deasserted signals as Active/Inactive and retain their
+  raw text in attributes without inferring hardware health. Continue to filter
+  unset, unreadable, opaque, and non-finite data.
+
 ## 1.0.11 - 2026-10-19
 
 - Add Save and reload app using Supervisor's self-restart API. Keep the progress
