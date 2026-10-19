@@ -1,4 +1,6 @@
-# HA iDRAC Controller
+<p align="center">
+  <img src="ha-idrac-controller/logo.png" alt="HA iDRAC Controller" width="500">
+</p>
 
 A Home Assistant app for Dell PowerEdge servers. It reads temperatures, fan
 speeds, power consumption and PSU status through the iDRAC's IPMI interface,
