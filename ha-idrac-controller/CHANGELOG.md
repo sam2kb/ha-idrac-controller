@@ -1,3 +1,16 @@
+## 1.1.2 - 2026-10-19
+
+- Clear missing fan RPM in Home Assistant, including retained fan entities when
+  the app starts while the server is off.
+- Read standard IPMI chassis power state and show Server power in HA and the
+  dashboard. Suppress cached host temperatures and fan speeds while off; keep
+  reported standby power and inlet temperature. Resume readings when powered on.
+- Prevent unreadable duplicate battery slots from creating new health entities
+  and remove those phantom discoveries from older versions. Keep confirmed
+  second batteries and their faults separate.
+- Distribute prebuilt, signed amd64 and aarch64 images. Add one-click repository
+  installation badges to both guides.
+
 ## 1.1.1 - 2026-10-19
 
 - Replace timed full-page reloads with background reading updates. Preserve

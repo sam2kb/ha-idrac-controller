@@ -34,6 +34,7 @@ def make_worker(monkeypatch, tmp_path):
         }
         item = main.ServerWorker(config, opts)
         item._log = Mock()
+        item.ipmi.get_chassis_power_state = Mock(return_value=True)
         item.ipmi.retrieve_temperatures_raw = Mock(return_value=CPU_COOL)
         item.ipmi.retrieve_fan_rpms_raw = Mock(return_value="")
         item.ipmi.retrieve_power_sdr_raw = Mock(return_value="")
@@ -832,3 +833,138 @@ def test_same_named_active_batteries_keep_separate_mqtt_health(make_worker):
     for slug, value in (("battery_romb_battery_health", "OK"), ("battery_romb_battery_11_2_69h_health", "Failed")):
         assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/{slug}"])["state"] == value
         assert f"homeassistant/sensor/idrac_controller_fixture_{slug}/config" in payloads
+
+
+
+def test_shutdown_clears_cached_host_values_preserves_standby_and_recovers(make_worker):
+    import copy
+    import json
+    item = make_worker(fan_control_enabled=False, include_advanced_diagnostics=True)
+    item._initialize()
+    del item._publish_mqtt_data
+    item.mqtt.is_connected = True
+    item.ipmi.get_chassis_power_state.side_effect = [True, False, True]
+    item.ipmi.retrieve_temperatures_raw.side_effect = [
+        CPU_COOL + "\nInlet Temp | 04h | ok | 7.1 | 23 degrees C",
+        CPU_COOL + "\nInlet Temp | 04h | ok | 7.1 | 24 degrees C",
+        CPU_WARM + "\nInlet Temp | 04h | ok | 7.1 | 25 degrees C",
+    ]
+    item.ipmi.retrieve_fan_rpms_raw.side_effect = [
+        "Fan1 | 30h | ok | 7.1 | 1440 RPM",
+        "Fan1 | 30h | ok | 7.1 | 1440 RPM",  # Stale numeric BMC reading.
+        "Fan1 | 30h | ok | 7.1 | 2600 RPM",
+    ]
+    item.ipmi.retrieve_power_sdr_raw.side_effect = [
+        "Pwr Consumption | 77h | ok | 7.1 | 84 Watts",
+        "Pwr Consumption | 77h | ok | 7.1 | 10 Watts\nDIMM Temp | 45h | ok | 32.1 | 40 degrees C",
+        "Pwr Consumption | 77h | ok | 7.1 | 95 Watts",
+    ]
+    snapshots, payloads = [], []
+    def sleep(_):
+        snapshots.append(copy.deepcopy(main.ALL_SERVERS_STATUS[item.alias]))
+        payloads.append({call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list})
+        item.mqtt.publish.reset_mock()
+        if len(snapshots) == 3:
+            item.stop()
+    item._sleep = sleep
+    item._run_loop()
+    off = snapshots[1]
+    assert off["server_power"] == "Off"
+    assert off["cpu_temps_c"] == [] and off["hottest_cpu_temp_c"] is None
+    assert off["actual_fan_rpms"] == [] and off["exhaust_temp_c"] is None
+    assert off["inlet_temp_c"] == 24 and off["power_consumption_watts"] == 10
+    assert off["target_fan_speed_percent"] == "Server off"
+    assert not off["sensor_readings"]
+    for slug in ("fan_fan1_rpm", "cpu_0_temp", "hottest_cpu_temp", "target_fan_speed"):
+        assert json.loads(payloads[1][f"{item.mqtt.base_topic}/sensor/{slug}"])["state"] is None
+    assert json.loads(payloads[1][f"{item.mqtt.base_topic}/sensor/server_power"])["state"] == "Off"
+    assert snapshots[2]["server_power"] == "On"
+    assert snapshots[2]["cpu_temps_c"] == [50]
+    assert snapshots[2]["actual_fan_rpms"] == [{"name": "Fan1", "rpm": 2600}]
+    item.ipmi.apply_user_fan_control_profile.assert_not_called()
+    item.ipmi.apply_dell_fan_control_profile.assert_not_called()
+    item.ipmi.chassis_power_on.assert_not_called()
+    item.ipmi.chassis_power_off.assert_not_called()
+
+
+def test_missing_fan_poll_clears_mqtt_without_requiring_server_off(make_worker):
+    import json
+    item = make_worker(fan_control_enabled=False)
+    item._initialize()
+    del item._publish_mqtt_data
+    item.mqtt.is_connected = True
+    item.ipmi.retrieve_fan_rpms_raw.side_effect = ["Fan1 | 30h | ok | 7.1 | 1440 RPM", None]
+    run_cycles(item, 2)
+    payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+    assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/fan_fan1_rpm"])["state"] is None
+
+
+@pytest.mark.parametrize("advanced", [False, True])
+def test_retained_owned_fan_is_cleared_on_cold_start_before_a_live_read(make_worker, advanced):
+    import json
+    item = make_worker(fan_control_enabled=False, include_advanced_diagnostics=advanced)
+    item._initialize()
+    item.mqtt.is_connected = True
+    item._on_mqtt_connected()
+    slug = "fan_fan1_rpm"
+    device = item.mqtt.device_info_dict
+    payload = {"name": "Fan1 RPM", "unique_id": device["identifiers"][0] + "_" + slug,
+               "device": device, "origin": {"name": "HA iDRAC Controller"}}
+    message = SimpleNamespace(topic="homeassistant/sensor/" + payload["unique_id"] + "/config",
+                              payload=json.dumps(payload).encode(), retain=True)
+    item.mqtt._on_message(None, None, message)
+    payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+    assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/{slug}"])["state"] is None
+    assert item._known_fans == {slug: "Fan1 RPM"}
+    # Live rediscovery is not a retained replay and must not clear fresh data.
+    item.mqtt.publish.reset_mock()
+    message.retain = False
+    item.mqtt._on_message(None, None, message)
+    item.mqtt.publish.assert_not_called()
+
+
+def test_unreadable_spare_battery_does_not_become_an_entity_and_old_phantom_is_removed(make_worker):
+    import json
+    item = make_worker(fan_control_enabled=False)
+    item._initialize()
+    del item._publish_mqtt_data
+    item.mqtt.is_connected = True
+    rows = "ROMB Battery | 68h | ok | 11.1 |\nROMB Battery | 69h | ns | 11.2 | Disabled"
+    item._update_status({"cpu_temps": []}, [], 10, [], "Server off", item.ipmi.parse_battery_status(rows))
+    item.mqtt.publish.reset_mock()
+    rows = rows.replace("68h | ok", "68h | ns").replace("Disabled", "No Reading")
+    item._update_status({"cpu_temps": []}, [], 10, [], "Server off", item.ipmi.parse_battery_status(rows))
+    payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+    phantom = "battery_romb_battery_11_2_69h"
+    for suffix in ("health", "voltage"):
+        assert payloads[f"homeassistant/sensor/idrac_controller_fixture_{phantom}_{suffix}/config"] == ""
+    assert [battery["name"] for battery in main.ALL_SERVERS_STATUS[item.alias]["batteries"]] == ["ROMB Battery"]
+    assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/battery_romb_battery_health"])["state"] == "Unknown"
+    # A genuine second battery fault is still discovered, with the same identity.
+    rows = rows.replace("69h | ns | 11.2 | No Reading", "69h | cr | 11.2 | Failed")
+    item._update_status({"cpu_temps": []}, [], 10, [], "Server off", item.ipmi.parse_battery_status(rows))
+    assert len(main.ALL_SERVERS_STATUS[item.alias]["batteries"]) == 2
+    item.mqtt.publish.reset_mock()
+    rows = rows.replace("69h | cr | 11.2 | Failed", "69h | ns | 11.2 | No Reading")
+    item._update_status({"cpu_temps": []}, [], 10, [], "Server off", item.ipmi.parse_battery_status(rows))
+    payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+    assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/{phantom}_health"])["state"] == "Unknown"
+    assert not any(topic.endswith(f"_{phantom}_health/config") for topic in payloads)
+
+
+@pytest.mark.parametrize("mode", ["auto", "simple", "curve", "target"])
+def test_confirmed_off_skips_fan_writes_even_if_bmc_returns_cached_cpu(make_worker, mode):
+    item = make_worker(fan_mode=mode)
+    item.ipmi.get_chassis_power_state.return_value = False
+    run_cycles(item)
+    item.ipmi.apply_user_fan_control_profile.assert_not_called()
+    item.ipmi.apply_dell_fan_control_profile.assert_not_called()
+    assert main.ALL_SERVERS_STATUS[item.alias]["server_power"] == "Off"
+
+
+def test_failed_power_state_query_is_unknown_and_does_not_discard_live_cpu(make_worker):
+    item = make_worker(fan_control_enabled=False)
+    item.ipmi.get_chassis_power_state.return_value = None
+    run_cycles(item)
+    assert main.ALL_SERVERS_STATUS[item.alias]["server_power"] is None
+    assert main.ALL_SERVERS_STATUS[item.alias]["cpu_temps_c"] == [30]

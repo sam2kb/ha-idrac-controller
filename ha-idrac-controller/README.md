@@ -38,6 +38,8 @@ https://github.com/sam2kb/ha-idrac-controller
 
 Install HA iDRAC Controller from the app store. iDRAC 9 and newer are outside scope.
 
+Home Assistant downloads a prebuilt image for amd64 or aarch64.
+
 ## Configure
 
 1. Leave MQTT host, username and password blank to use Supervisor's registered
@@ -79,6 +81,10 @@ alarms; affected readings appear in its alerts attribute. No alerts is not a
 whole-server health assessment. Battery, PSU and intrusion states are separate.
 Generic Active/Inactive states describe signals, not good/bad health; attributes
 retain their raw text.
+
+Server power comes from IPMI chassis status. While off, host temperatures and
+fan RPM clear; reported inlet temperature and standby power remain available.
+An unreadable spare battery slot does not create a new entity.
 
 Unavailable or unrecognised readings stay Unknown. Batteries have health and,
 when reported with advanced diagnostics enabled, voltage; no charge percentage

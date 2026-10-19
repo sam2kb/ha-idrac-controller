@@ -5,7 +5,7 @@
 {% if servers %}<div class="server-grid">
 {% for server in servers %}<article class="panel server-card" data-refresh-key="{{ server.alias }}">
     <header class="server-heading">
-        <div><h2>{{ server.alias }}</h2><span class="server-address">{{ server.ip }}</span></div>
+        <div><h2>{{ server.alias }}</h2><span class="server-address">{{ server.ip }}</span>{% if server.server_power is defined %} <span class="badge badge-neutral">Server {{ server.server_power|lower if server.server_power else 'power unknown' }}</span>{% endif %}</div>
         <a class="button button-secondary button-small" href="servers/edit/{{ server.alias|urlencode }}" aria-label="Edit {{ server.alias }}">Edit server</a>
     </header>
     <div class="metric-grid">

@@ -1,3 +1,4 @@
+import pytest
 """Parser tests against output shapes from 12G (iDRAC7) and 13G (iDRAC8) servers."""
 from conftest import load_module
 
@@ -470,3 +471,17 @@ def test_disabled_battery_slots_are_omitted_but_failed_reads_stay_unknown():
         {"name": "ROMB Battery", "health": "Unknown", "voltage": None},
     ]
     assert manager.parse_battery_status("ROMB Battery | 69h | cr | 11.2 | Failed")[0]["health"] == "Failed"
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("Chassis Power is on", True), ("Chassis Power is off\n", False),
+    ("CHASSIS POWER IS OFF", False), (None, None), ("", None),
+    ("Error: power unavailable", None), ("Chassis Power is unknown", None),
+])
+def test_chassis_state_is_read_only_and_never_guessed(monkeypatch, raw, expected):
+    from unittest.mock import Mock
+    manager = make_manager()
+    query = Mock(return_value=raw)
+    monkeypatch.setattr(manager, "_run_ipmi_command", query)
+    assert manager.get_chassis_power_state() is expected
+    query.assert_called_once_with(["chassis", "power", "status"], is_raw_command=False, timeout=3)

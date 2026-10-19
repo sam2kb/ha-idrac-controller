@@ -117,7 +117,10 @@ class MqttClient:
         if not msg.topic.startswith(prefix) or not msg.topic.endswith("/config"):
             return
         slug = msg.topic[len(prefix):-len("/config")]
-        if not (re.fullmatch(r"ipmi_[0-9a-f]{2}_\d+_\d+", slug)
+        is_fan = bool(re.fullmatch(r"fan_[a-z0-9_]+_rpm", slug))
+        if is_fan and not getattr(msg, "retain", False):
+            return  # Our own live discovery must not clear a freshly sent RPM.
+        if not (is_fan or re.fullmatch(r"ipmi_[0-9a-f]{2}_\d+_\d+", slug)
                 or re.fullmatch(r"battery_[a-z0-9_]+_voltage", slug) or slug in (
             "dell_instantaneous_power", "dell_instantaneous_current",
             "dell_instantaneous_headroom", "dell_peak_headroom",

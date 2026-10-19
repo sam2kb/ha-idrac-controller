@@ -254,6 +254,12 @@ class IPMIManager:
                            f"Model='{model_info['model']}', Serial={model_info['serial']}")
         return model_info
 
+    def get_chassis_power_state(self):
+        """Read standard IPMI chassis state; a failed read is never 'off'."""
+        raw = self._run_ipmi_command(["chassis", "power", "status"], is_raw_command=False, timeout=3)
+        match = re.fullmatch(r"Chassis Power is (on|off)", (raw or "").strip(), re.IGNORECASE)
+        return match.group(1).lower() == "on" if match else None
+
     def retrieve_temperatures_raw(self):
         self._log("debug", "Retrieving raw temperature SDR data...")
         return self._run_ipmi_command(["sdr", "type", "temperature"], is_raw_command=False)

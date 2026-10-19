@@ -35,6 +35,8 @@ iDRAC 9 and newer are outside this app's scope.
 
 3. Install HA iDRAC Controller.
 
+Home Assistant downloads a prebuilt image for amd64 or aarch64.
+
 ## Setup
 
 1. Leave MQTT host, username and password blank to use Supervisor's registered
@@ -56,6 +58,10 @@ threshold alerts, when reported by the server.
 For voltage/current, detailed power figures and other signals, enable Include
 advanced diagnostics in the server's edit form, then Save and reload app.
 The switch applies to both HA and the dashboard; it defaults to Off.
+
+Server power comes from IPMI chassis status. While off, host temperatures and
+fan RPM clear; reported inlet temperature and standby power remain available.
+An unreadable spare battery slot does not create a new entity.
 
 Unavailable values stay unknown. Battery health is not a charge percentage.
 An absent exhaust sensor and a target fan speed in automatic mode can be unknown.
