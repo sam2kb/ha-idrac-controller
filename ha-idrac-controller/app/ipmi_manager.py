@@ -433,6 +433,59 @@ class IPMIManager:
             batteries.append({"name": name, "health": health, "voltage": voltage})
         return batteries
 
+    def retrieve_power_details_raw(self):
+        """Read Dell power/headroom/thresholds; this never changes a power cap."""
+        return self._run_ipmi_command(
+            ["delloem", "powermonitor", "powerconsumption", "watt"],
+            is_raw_command=False, timeout=5,
+        )
+
+    def parse_power_details(self, data):
+        """Use reported reading plus instantaneous headroom as capacity reference.
+
+        Warning/failure thresholds and PSU nameplate ratings are not capacity.
+        Keep unsupported/missing values unknown rather than estimating them.
+        """
+        values = {}
+        labels = {
+            "reading": "reading_watts", "warning threshold": "warning_watts",
+            "failure threshold": "failure_watts",
+            "system instantaneous headroom": "headroom_watts",
+        }
+        for line in (data or "").splitlines():
+            match = re.fullmatch(r"\s*([^:]+):\s*(\d+(?:\.\d+)?)\s*W(?:att)?s?\s*", line, re.IGNORECASE)
+            if match and (key := labels.get(match.group(1).strip().lower())):
+                values[key] = float(match.group(2))
+        if "reading_watts" in values and "headroom_watts" in values:
+            capacity = values["reading_watts"] + values["headroom_watts"]
+            if capacity > 0:
+                values["capacity_watts"] = capacity
+        return values
+
+    def parse_intrusion_status(self, sdr_data):
+        """Read the chassis tamper state, not the discrete sensor's generic 'ok'."""
+        for line in (sdr_data or "").splitlines():
+            fields = [part.strip() for part in line.split("|")]
+            if len(fields) != 5 or "intrusion" not in fields[0].lower():
+                continue
+            reading = fields[4].lower()
+            active = None
+            if fields[2].lower() not in ("ns", "na", "u"):
+                if reading in ("", "0x00", "0x0000", "clear", "normal", "ok") or re.search(r"\b(?:not asserted|deasserted|no intrusion)\b", reading):
+                    active = False
+                elif "intrusion" in reading or reading == "asserted":
+                    active = True
+            return {"name": "System Board Intrusion", "active": active}
+        return None
+
+    def chassis_power_off(self):
+        """Immediately force power off; only called through an explicit opt-in."""
+        return self._run_ipmi_command(["chassis", "power", "off"], is_raw_command=False)
+
+    def chassis_power_cycle(self):
+        """Cold boot by cycling chassis power without an OS shutdown."""
+        return self._run_ipmi_command(["chassis", "power", "cycle"], is_raw_command=False)
+
     def chassis_power_on(self):
         """Power on the chassis; never toggle, cycle or force power off."""
         return self._run_ipmi_command(["chassis", "power", "on"], is_raw_command=False)

@@ -44,6 +44,7 @@ def test_sensor_discovery_has_origin_availability_and_precision():
     assert data["availability"][0]["payload_available"] == "online"
     assert data["suggested_display_precision"] == 1
     assert data["state_class"] == "measurement"
+    assert data["unit_of_measurement"] == "°C"
     assert "json_attributes_topic" not in data
     assert data["device"]["serial_number"] == "ABC1234"
     assert data["device"]["sw_version"] == "2.86.45.45"

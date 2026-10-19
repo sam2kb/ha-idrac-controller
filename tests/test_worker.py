@@ -37,6 +37,7 @@ def make_worker(monkeypatch, tmp_path):
         item.ipmi.retrieve_temperatures_raw = Mock(return_value=CPU_COOL)
         item.ipmi.retrieve_fan_rpms_raw = Mock(return_value="")
         item.ipmi.retrieve_power_sdr_raw = Mock(return_value="")
+        item.ipmi.retrieve_power_details_raw = Mock(return_value=None)
         item.ipmi.apply_user_fan_control_profile = Mock(return_value="")
         item.ipmi.apply_dell_fan_control_profile = Mock(return_value="")
         item.ipmi.get_server_model_info = Mock(return_value={})
@@ -44,6 +45,8 @@ def make_worker(monkeypatch, tmp_path):
         item.ipmi.chassis_shutdown = Mock(return_value="accepted")
         item.ipmi.chassis_power_on = Mock(return_value="accepted")
         item.ipmi.chassis_hard_reset = Mock(return_value="accepted")
+        item.ipmi.chassis_power_off = Mock(return_value="accepted")
+        item.ipmi.chassis_power_cycle = Mock(return_value="accepted")
         item.mqtt.publish = Mock()
         item.mqtt.connect = Mock()
         item.mqtt.subscribe = Mock()
@@ -296,7 +299,7 @@ def test_existing_explicit_custom_modes_remain_active(make_worker, mode):
 
 @pytest.mark.parametrize("value", [None, False, "false", "true", 1, [], {}])
 def test_power_actions_require_boolean_true_not_truthy_config(make_worker, value):
-    item = make_worker(allow_shutdown=value, allow_reboot=value, allow_power_on=value)
+    item = make_worker(**{action["option"]: value for action in main.POWER_ACTIONS.values()})
     item._initialize()
     item._on_mqtt_connected()
     item.mqtt.subscribe.assert_not_called()
@@ -328,7 +331,7 @@ def test_only_allowed_power_action_is_discovered_subscribed_and_dispatched(make_
     assert configs[0]["name"] == description["name"]
     assert configs[0]["entity_category"] == "config"
     assert configs[0]["retain"] is False
-    assert configs[0].get("device_class") == ("restart" if action == "reboot" else None)
+    assert configs[0].get("device_class") == ("restart" if action in ("reboot", "power_cycle") else None)
     for other in main.POWER_ACTIONS:
         if other != action:
             item._on_mqtt_message(f"{item.mqtt.base_topic}/command/{other}", "PRESS")
@@ -467,3 +470,81 @@ def test_discrete_battery_health_does_not_invent_voltage(make_worker):
     topics = [call.args[0] for call in item.mqtt.publish.call_args_list]
     assert any("battery_cmos_battery_health" in topic for topic in topics)
     assert not any("battery_cmos_battery_voltage" in topic for topic in topics)
+
+
+POWER_DETAILS = """System Board System Level
+Reading : 70 W
+Warning threshold : 896 W
+Failure threshold : 980 W
+Amperage value: 0.6 A
+Headroom
+System Instantaneous Headroom : 830 W
+System Peak Headroom : 800 W
+"""
+
+
+def test_power_capacity_uses_headroom_not_thresholds_and_publishes_separate_sensors(make_worker):
+    import json
+    item = make_worker()
+    item._initialize()
+    del item._publish_mqtt_data
+    item.mqtt.is_connected = True
+    item._power_details = item.ipmi.parse_power_details(POWER_DETAILS)
+    item._update_status({"cpu_temps": [35]}, [], 70, [], "Dell Auto")
+    payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+    for slug, value in [("power_capacity_percent", 7.78), ("power_capacity_watts", 900),
+                        ("power_warning_watts", 896), ("power_failure_watts", 980)]:
+        assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/{slug}"])["state"] == value
+    assert main.ALL_SERVERS_STATUS[item.alias]["power_capacity_percent"] == 7.78
+    item._power_details = {}  # Failed/unsupported refresh must clear previous values.
+    item.mqtt.publish.reset_mock()
+    item._update_status({"cpu_temps": [35]}, [], 70, [], "Dell Auto")
+    payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+    assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/power_capacity_percent"])["state"] is None
+    assert json.loads(payloads[f"{item.mqtt.base_topic}/sensor/power_warning_watts"])["state"] is None
+
+
+def test_optional_power_poll_is_throttled_and_runs_after_cooling(make_worker, monkeypatch):
+    item = make_worker(fan_mode="auto")
+    events = []
+    item.ipmi.apply_dell_fan_control_profile.side_effect = lambda: events.append("cooling") or ""
+    item.ipmi.retrieve_power_details_raw.side_effect = lambda: events.append("power-read") or POWER_DETAILS
+    clock = Mock(return_value=1000)
+    monkeypatch.setattr(main.time, "monotonic", clock)
+    run_cycles(item)
+    assert events == ["cooling", "power-read"]
+    assert item._power_details["capacity_watts"] == 900
+    item._refresh_power_details()
+    assert item.ipmi.retrieve_power_details_raw.call_count == 1
+    clock.return_value = 1061
+    item.ipmi.retrieve_power_details_raw.side_effect = None
+    item.ipmi.retrieve_power_details_raw.return_value = None
+    item._refresh_power_details()
+    assert item.ipmi.retrieve_power_details_raw.call_count == 2
+    assert item._power_details == {}
+
+
+def test_intrusion_publishes_tamper_state_and_unavailable_when_reading_missing(make_worker):
+    import json
+    item = make_worker()
+    item._initialize()
+    del item._publish_mqtt_data
+    item.mqtt.is_connected = True
+    temperatures = {"cpu_temps": [35]}
+    item._update_status(temperatures, [], 70, [], "Dell Auto")
+    assert not any("system_board_intrusion/config" in call.args[0] for call in item.mqtt.publish.call_args_list)
+    for active in (False, True):
+        item._update_status(temperatures, [], 70, [], "Dell Auto", intrusion={"active": active})
+        payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+        assert payloads[f"{item.mqtt.base_topic}/binary_sensor/system_board_intrusion"] == ("ON" if active else "OFF")
+        assert payloads[f"{item.mqtt.base_topic}/intrusion/availability"] == "online"
+    discovery = json.loads(payloads["homeassistant/binary_sensor/idrac_controller_fixture_system_board_intrusion/config"])
+    assert discovery["device_class"] == "tamper"
+    assert discovery["availability"][-1]["topic"] == f"{item.mqtt.base_topic}/intrusion/availability"
+    assert discovery["availability_mode"] == "all"
+    item.mqtt.publish.reset_mock()
+    item._update_status(temperatures, [], 70, [], "Dell Auto", intrusion=None)
+    payloads = {call.args[0]: call.args[1] for call in item.mqtt.publish.call_args_list}
+    assert payloads[f"{item.mqtt.base_topic}/intrusion/availability"] == "offline"
+    assert f"{item.mqtt.base_topic}/binary_sensor/system_board_intrusion" not in payloads
+    assert main.ALL_SERVERS_STATUS[item.alias]["intrusion_active"] is None

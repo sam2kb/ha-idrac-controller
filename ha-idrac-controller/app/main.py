@@ -57,6 +57,9 @@ class ServerWorker:
         self.server_info = {}
         self.discovered_sensors = set()
         self._known_batteries = {}
+        self._intrusion_seen = False
+        self._power_details = {}
+        self._next_power_details = 0.0
         self._next_mqtt_attempt = 0.0
         self._mqtt_configured = False
         self._pcie_response_disabled = False
@@ -100,6 +103,7 @@ class ServerWorker:
         """Refresh discovery and expose only explicitly enabled power actions."""
         self._log("info", "MQTT connected; refreshing discovery and power permissions.")
         self.discovered_sensors.clear()
+        self.mqtt.publish(f"{self.mqtt.base_topic}/intrusion/availability", "offline", retain=True)
         for action, description in POWER_ACTIONS.items():
             command_topic = f"{self.mqtt.base_topic}/command/{action}"
             # Remove any broker-stored command before subscribing on reconnect.
@@ -238,6 +242,7 @@ class ServerWorker:
             power = self.ipmi.parse_power_consumption(power_sdr_data)
             psu_statuses = self.ipmi.get_power_status(power_sdr_data)
             batteries = self.ipmi.parse_battery_status(power_sdr_data)
+            intrusion = self.ipmi.parse_intrusion_status(power_sdr_data)
 
             hottest_cpu = max(temps['cpu_temps']) if temps['cpu_temps'] else None
             target_fan_speed = "Dell Auto"
@@ -305,7 +310,10 @@ class ServerWorker:
                             if self.ipmi.apply_user_fan_control_profile(target_fan_speed) is None:
                                 target_fan_speed = "Dell Auto (fan command failed)"
 
-            self._update_status(temps, fans, power, psu_statuses, target_fan_speed, batteries)
+            # Optional telemetry is read after applying cooling, at most once
+            # a minute with a bounded timeout; never delay a fan hand-back.
+            self._refresh_power_details()
+            self._update_status(temps, fans, power, psu_statuses, target_fan_speed, batteries, intrusion)
             self._sleep(max(0.1, self.global_opts["check_interval_seconds"] - (time.time() - start_time)))
 
     def _use_dell_auto(self, reason=None):
@@ -316,7 +324,14 @@ class ServerWorker:
             return "Unknown (Dell auto hand-back failed)"
         return f"Dell Auto ({reason})" if reason else "Dell Auto"
 
-    def _update_status(self, temps, fans, power, psu_statuses, target_fan_speed, batteries=None):
+    def _refresh_power_details(self):
+        now = time.monotonic()
+        if now < self._next_power_details:
+            return
+        self._next_power_details = now + 60
+        self._power_details = self.ipmi.parse_power_details(self.ipmi.retrieve_power_details_raw())
+
+    def _update_status(self, temps, fans, power, psu_statuses, target_fan_speed, batteries=None, intrusion=None):
         # Keep an already discovered battery visible as unknown if a later
         # read fails or no longer contains it, rather than leaving stale health.
         self._known_batteries = {name: {"name": name, "health": "Unknown", "voltage": None}
@@ -324,12 +339,21 @@ class ServerWorker:
         self._known_batteries.update({battery["name"]: battery for battery in (batteries or [])})
         batteries = list(self._known_batteries.values())
         cpu_ids = temps.get("cpu_ids", list(range(1, len(temps.get("cpu_temps", [])) + 1)))
+        self._intrusion_seen = self._intrusion_seen or intrusion is not None
+        capacity = self._power_details.get("capacity_watts")
+        capacity_percent = round(100 * power / capacity, 2) if capacity and power is not None else None
         hottest_cpu = max(temps['cpu_temps']) if temps['cpu_temps'] else None
         status_data = {
             "hottest_cpu_temp": hottest_cpu,
             "inlet_temp": temps.get('inlet_temp'),
             "exhaust_temp": temps.get('exhaust_temp'),
             "power": power,
+            "power_capacity_percent": capacity_percent,
+            "power_capacity_watts": capacity,
+            "power_warning_watts": self._power_details.get("warning_watts"),
+            "power_failure_watts": self._power_details.get("failure_watts"),
+            "intrusion_seen": self._intrusion_seen,
+            "intrusion_active": intrusion.get("active") if intrusion else None,
             "target_fan_speed": None if isinstance(target_fan_speed, str) else target_fan_speed,
             "cooling_mode": target_fan_speed if isinstance(target_fan_speed, str) else "Custom control",
             "cpus": temps.get('cpu_temps', []),
@@ -347,6 +371,12 @@ class ServerWorker:
                 "inlet_temp_c": temps.get('inlet_temp'),
                 "exhaust_temp_c": temps.get('exhaust_temp'),
                 "power_consumption_watts": power,
+                "power_capacity_percent": capacity_percent,
+                "power_capacity_watts": capacity,
+                "power_warning_watts": self._power_details.get("warning_watts"),
+                "power_failure_watts": self._power_details.get("failure_watts"),
+                "intrusion_seen": self._intrusion_seen,
+                "intrusion_active": status_data["intrusion_active"],
                 "target_fan_speed_percent": target_fan_speed,
                 "cpu_temps_c": temps.get('cpu_temps', []),
                 "cpu_ids": cpu_ids,
@@ -375,6 +405,21 @@ class ServerWorker:
             "power": {"component": "sensor", "device_class": "power", "unit": "W", "state_class": "measurement", "icon": "mdi:flash", "suggested_display_precision": 0},
             "target_fan_speed": {"component": "sensor", "unit": "%", "icon": "mdi:fan-chevron-up", "suggested_display_precision": 0},
         }
+        for slug, name, unit, device_class in [
+            ("power_capacity_percent", "Power Capacity Used", "%", None),
+            ("power_capacity_watts", "Power Capacity Reference", "W", "power"),
+            ("power_warning_watts", "Power Warning Threshold", "W", "power"),
+            ("power_failure_watts", "Power Failure Threshold", "W", "power"),
+        ]:
+            sensors[slug] = {"component": "sensor", "name": name, "unit": unit,
+                             "device_class": device_class, "entity_category": "diagnostic",
+                             "state_class": "measurement", "suggested_display_precision": 2 if unit == "%" else 0}
+        if status.get("intrusion_seen"):
+            sensors["system_board_intrusion"] = {
+                "component": "binary_sensor", "name": "System Board Intrusion",
+                "device_class": "tamper", "entity_category": "diagnostic",
+                "extra_availability_topic": f"{self.mqtt.base_topic}/intrusion/availability",
+            }
         cpu_ids = status.get("cpu_ids", list(range(1, len(status.get("cpus", [])) + 1)))
         cpu_values = {number - 1: value for number, value in zip(cpu_ids, status.get("cpus", []))}
         # Preserve old unique IDs: cpu_0_temp is CPU1, cpu_1_temp is CPU2.
@@ -412,6 +457,7 @@ class ServerWorker:
                     state_class=desc.get('state_class'),
                     entity_category=desc.get('entity_category'),
                     suggested_display_precision=desc.get('suggested_display_precision'),
+                    extra_availability_topic=desc.get("extra_availability_topic"),
                 )
                 self.discovered_sensors.add(slug)
 
@@ -428,6 +474,11 @@ class ServerWorker:
                 else:
                     value = status.get(slug)
                 self.mqtt.publish_state('sensor', slug, value)
+            elif slug == "system_board_intrusion":
+                active = status.get("intrusion_active")
+                self.mqtt.publish(desc["extra_availability_topic"], "online" if active is not None else "offline", retain=True)
+                if active is not None:
+                    self.mqtt.publish_state("binary_sensor", slug, "ON" if active else "OFF")
             elif desc['component'] == 'binary_sensor' and slug.startswith('psu_'):
                 psu_name = desc['name']
                 psu_data = next((p for p in status['psus'] if p['name'] == psu_name), None)

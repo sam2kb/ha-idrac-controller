@@ -14,7 +14,7 @@ them through MQTT, and manages fan speed per server.
 - Monitoring: each server becomes an MQTT device with sensors for individual
   CPU temperatures, hottest CPU, inlet and exhaust temperatures, fan RPM, power
   consumption, target fan speed and PSU status.
-- Optional power-on, graceful shutdown and hard-reset reboot buttons, each
+- Optional power-on, graceful shutdown, reset, power cycle and forced-off buttons, each
   disabled by default per server.
 - A web UI through ingress: a live dashboard and a Manage Servers page.
 - MQTT discovery: entities are created automatically.
@@ -50,6 +50,11 @@ every server worker has died. The MQTT device carries the iDRAC firmware version
 and service tag. Contradictory thresholds are corrected with a warning, and
 temperatures outside -20 to 125 °C are ignored.
 
+Temperature readings and cooling thresholds use Celsius. Home Assistant may
+convert sensor displays to your preferred unit. To keep server sensors in °C,
+open each temperature entity's settings and select °C as its unit of measurement.
+MQTT discovery does not expose a per-device display-unit override.
+
 CPU temperatures are labeled CPU1, CPU2 and so on, using the socket number
 reported by IPMI. Existing MQTT unique IDs stay unchanged to preserve automations.
 A missing CPU reading stays unknown and does not shift the other socket's label.
@@ -58,6 +63,17 @@ Battery health appears only when the SDR data exposes a battery, such as the
 CMOS battery. Voltage appears only if a numeric voltage is reported. These
 sensors use the existing SDR poll and do not estimate charge percentages.
 An unavailable battery reading is shown as Unknown.
+
+The dashboard shows watts and capacity used, for example 70 W (7.78% Capacity),
+when Dell's read-only power query reports a reading and instantaneous headroom.
+The capacity reference is that reading plus headroom; it is separate from PSU
+nameplate ratings and warning/failure thresholds. All are exposed as separate
+MQTT sensors. Missing or unsupported values remain unknown. This optional query
+runs at most once a minute, after cooling control, with a five-second timeout.
+
+System Board Intrusion is an MQTT tamper sensor for alerts. On means intrusion
+is asserted; off means clear. Missing readings make the sensor unavailable.
+It uses the existing SDR poll and does not clear or acknowledge intrusion events.
 
 ## Prerequisites
 
@@ -132,11 +148,16 @@ before this option existed. In Manage Servers, open Edit and expand Server
 power actions. Enable each action separately, save, then restart this app.
 Only enabled actions appear in the Home Assistant device's configuration controls.
 
-- Power on starts a server that is off.
-- Shut down (graceful) sends an ACPI request for the OS to shut down and power
-  off. The OS must support and handle the request. The app never forces power off.
-- Reboot (hard reset) immediately resets the server without shutting down the
-  OS. Unsaved data can be lost. Use the server's OS for a graceful reboot.
+- Power On System starts a server that is off.
+- Graceful Shutdown sends an ACPI request for the OS to shut down and power off.
+  The OS must support the request. This action never falls back to forced off.
+- Reset System (warm boot) is an immediate hardware reset, without an OS
+  shutdown. Use the server's OS for a graceful reboot.
+- Power Cycle System (cold boot) cuts power, then starts the server again.
+- Power Off System (forced) immediately cuts server power.
+
+Reset, power cycle and forced off can lose unsaved data. Each has its own
+opt-in. NMI is a diagnostic interrupt, not a normal power action.
 
 On update and reconnect, the app removes disabled buttons from MQTT discovery,
 including the old shutdown button. Commands for disabled actions are rejected.
@@ -155,8 +176,10 @@ app has no usable exhaust reading, rather than a measured zero.
 Each server becomes a device named `iDRAC (<alias>)` with:
 
 - battery health and voltage, when reported by iDRAC
+- a System Board Intrusion tamper sensor, when reported
+- power capacity used, capacity reference and warning/failure thresholds
 - a cooling-status sensor
-- power-on, graceful shutdown and hard-reset reboot buttons, when explicitly
+- power-on, graceful shutdown, reset, power cycle and forced-off buttons, when explicitly
   enabled for that server
 - a PSU problem sensor for each power supply
 - sensors for CPU temperatures, hottest CPU, inlet, exhaust, fan RPM, power and

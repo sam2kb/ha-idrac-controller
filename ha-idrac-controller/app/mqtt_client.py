@@ -151,7 +151,7 @@ class MqttClient:
 
     def publish_discovery(self, component, slug, name, device_class=None, unit=None, icon=None,
                           cmd_topic=None, val_template=None, state_class=None,
-                          entity_category=None, suggested_display_precision=None):
+                          entity_category=None, suggested_display_precision=None, extra_availability_topic=None):
         if not self.device_info_dict:
             return
 
@@ -184,6 +184,13 @@ class MqttClient:
             payload["availability"] = [connection_availability]
         else:
             payload["availability"].append(connection_availability)
+            payload["availability_mode"] = "all"
+
+        if extra_availability_topic:
+            payload["availability"].append({
+                "topic": extra_availability_topic,
+                "payload_available": "online", "payload_not_available": "offline",
+            })
             payload["availability_mode"] = "all"
 
         if component == 'sensor':

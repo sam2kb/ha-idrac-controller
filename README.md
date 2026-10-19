@@ -29,10 +29,15 @@ third-party PCIe cards and restores Dell's setting when the app stops.
 
 In Home Assistant, each server becomes an MQTT device with sensors for CPU
 temperatures, hottest CPU, inlet and exhaust, fan RPM, power, target fan speed
-and PSU status. Power on, graceful shutdown and hard-reset reboot buttons are
+and PSU status. Power on, graceful shutdown, reset, power cycle and forced-off buttons are
 optional per server and disabled by default. The device carries
 the iDRAC firmware version and service tag. The web UI shows a dashboard for all
 servers and a Manage Servers page for adding, editing and deleting them.
+
+Temperature readings and cooling thresholds use Celsius. Home Assistant may
+convert sensor displays to your preferred unit. To keep server sensors in °C,
+open each temperature entity's settings and select °C as its unit of measurement.
+MQTT discovery does not expose a per-device display-unit override.
 
 CPU temperatures are labeled CPU1, CPU2 and so on, using the socket number
 reported by IPMI. Existing MQTT unique IDs stay unchanged to preserve automations.
@@ -42,6 +47,17 @@ Battery health appears only when the SDR data exposes a battery, such as the
 CMOS battery. Voltage appears only if a numeric voltage is reported. These
 sensors use the existing SDR poll and do not estimate charge percentages.
 An unavailable battery reading is shown as Unknown.
+
+The dashboard shows watts and capacity used, for example 70 W (7.78% Capacity),
+when Dell's read-only power query reports a reading and instantaneous headroom.
+The capacity reference is that reading plus headroom; it is separate from PSU
+nameplate ratings and warning/failure thresholds. All are exposed as separate
+MQTT sensors. Missing or unsupported values remain unknown. This optional query
+runs at most once a minute, after cooling control, with a five-second timeout.
+
+System Board Intrusion is an MQTT tamper sensor for alerts. On means intrusion
+is asserted; off means clear. Missing readings make the sensor unavailable.
+It uses the existing SDR poll and does not clear or acknowledge intrusion events.
 
 ## Requirements
 
@@ -83,11 +99,16 @@ before this option existed. In Manage Servers, open Edit and expand Server
 power actions. Enable each action separately, save, then restart this app.
 Only enabled actions appear in the Home Assistant device's configuration controls.
 
-- Power on starts a server that is off.
-- Shut down (graceful) sends an ACPI request for the OS to shut down and power
-  off. The OS must support and handle the request. The app never forces power off.
-- Reboot (hard reset) immediately resets the server without shutting down the
-  OS. Unsaved data can be lost. Use the server's OS for a graceful reboot.
+- Power On System starts a server that is off.
+- Graceful Shutdown sends an ACPI request for the OS to shut down and power off.
+  The OS must support the request. This action never falls back to forced off.
+- Reset System (warm boot) is an immediate hardware reset, without an OS
+  shutdown. Use the server's OS for a graceful reboot.
+- Power Cycle System (cold boot) cuts power, then starts the server again.
+- Power Off System (forced) immediately cuts server power.
+
+Reset, power cycle and forced off can lose unsaved data. Each has its own
+opt-in. NMI is a diagnostic interrupt, not a normal power action.
 
 On update and reconnect, the app removes disabled buttons from MQTT discovery,
 including the old shutdown button. Commands for disabled actions are rejected.

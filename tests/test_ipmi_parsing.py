@@ -168,7 +168,7 @@ def test_implausible_temperature_is_ignored():
 
 
 
-def test_power_methods_use_exact_ipmi_semantics_without_forced_off_or_cycle(monkeypatch):
+def test_power_methods_use_exact_named_ipmi_semantics(monkeypatch):
     from unittest.mock import Mock, call
     manager = make_manager()
     command = Mock(return_value="accepted")
@@ -176,10 +176,14 @@ def test_power_methods_use_exact_ipmi_semantics_without_forced_off_or_cycle(monk
     assert manager.chassis_shutdown() == "accepted"
     assert manager.chassis_power_on() == "accepted"
     assert manager.chassis_hard_reset() == "accepted"
+    assert manager.chassis_power_off() == "accepted"
+    assert manager.chassis_power_cycle() == "accepted"
     assert command.call_args_list == [
         call(["chassis", "power", "soft"], is_raw_command=False),
         call(["chassis", "power", "on"], is_raw_command=False),
         call(["chassis", "power", "reset"], is_raw_command=False),
+        call(["chassis", "power", "off"], is_raw_command=False),
+        call(["chassis", "power", "cycle"], is_raw_command=False),
     ]
 
 
@@ -222,3 +226,41 @@ def test_multiple_batteries_are_independent_and_do_not_create_charge_percentages
         "RAID Battery | 10h | ok | 23.2 | Low\n")
     assert [battery["health"] for battery in result] == ["Healthy", "Low"]
     assert all(set(battery) == {"name", "health", "voltage"} for battery in result)
+
+
+
+def test_power_details_parse_only_reported_capacity_inputs_and_thresholds():
+    manager = make_manager()
+    data = "Reading: 70 W\nWarning threshold: 896 W\nFailure threshold: 980 W\nSystem Instantaneous Headroom: 830 W\n"
+    result = manager.parse_power_details(data)
+    assert result == {"reading_watts": 70, "warning_watts": 896, "failure_watts": 980,
+                      "headroom_watts": 830, "capacity_watts": 900}
+    assert "capacity_watts" not in manager.parse_power_details("Warning threshold: 896 W\nFailure threshold: 980 W")
+    assert manager.parse_power_details(None) == {}
+    assert "capacity_watts" not in manager.parse_power_details("Reading: 0 W\nSystem Instantaneous Headroom: 0 W")
+    assert "capacity_watts" not in manager.parse_power_details("Reading: 70 BTU/hr\nSystem Instantaneous Headroom: 830 BTU/hr")
+
+
+def test_optional_power_details_query_is_read_only_and_bounded(monkeypatch):
+    from unittest.mock import Mock
+    manager = make_manager()
+    run = Mock(return_value="fixture")
+    monkeypatch.setattr(manager, "_run_ipmi_command", run)
+    assert manager.retrieve_power_details_raw() == "fixture"
+    run.assert_called_once_with(["delloem", "powermonitor", "powerconsumption", "watt"],
+                                is_raw_command=False, timeout=5)
+
+
+def test_intrusion_is_decoded_from_assertions_not_generic_ok_status():
+    manager = make_manager()
+    for status, reading, expected in [
+        ("ok", "", False), ("ok", "0x00", False), ("ok", "No Intrusion", False),
+        ("ok", "Deasserted", False), ("ok", "General Chassis intrusion", True),
+        ("ok", "Asserted", True), ("ns", "", None),
+        ("ns", "General Chassis intrusion", None), ("ok", "Unknown event", None),
+    ]:
+        assert manager.parse_intrusion_status(f"Intrusion | 73h | {status} | 23.1 | {reading}") == {
+            "name": "System Board Intrusion", "active": expected,
+        }
+    assert manager.parse_intrusion_status(ELIST) is None
+    assert manager.parse_intrusion_status(None) is None

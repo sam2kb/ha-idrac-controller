@@ -260,19 +260,19 @@ def test_failed_save_does_not_offer_restart_link_or_query_metadata(supervisor_se
 
 
 @pytest.mark.parametrize("path", ["/servers/add", "/servers/update/fixture"])
-@pytest.mark.parametrize("enabled_action", [None, "allow_power_on", "allow_shutdown", "allow_reboot"])
+@pytest.mark.parametrize("enabled_action", [None, "allow_power_on", "allow_shutdown", "allow_reboot", "allow_power_off", "allow_power_cycle"])
 def test_power_permissions_are_independent_opt_ins_and_can_be_disabled(web, path, enabled_action):
     client, config_path = web
     # Existing enabled flags must be removed when the new form opts out.
     servers = json.loads(config_path.read_text())
-    servers[0].update(allow_power_on=True, allow_shutdown=True, allow_reboot=True)
+    servers[0].update(allow_power_on=True, allow_shutdown=True, allow_reboot=True, allow_power_off=True, allow_power_cycle=True)
     config_path.write_text(json.dumps(servers))
     form = {"alias": "new", "fan_mode": "auto"}
     if enabled_action:
         form[enabled_action] = "true"
     assert client.post(path, data=form).status_code == 302
     saved = json.loads(config_path.read_text())[-1 if path.endswith("add") else 0]
-    for option in ("allow_power_on", "allow_shutdown", "allow_reboot"):
+    for option in ("allow_power_on", "allow_shutdown", "allow_reboot", "allow_power_off", "allow_power_cycle"):
         assert saved[option] is (option == enabled_action)
 
 
@@ -303,7 +303,7 @@ def test_legacy_and_new_server_forms_default_power_actions_to_disabled(web, path
     assert response.status_code == 200
     parser = PowerParser()
     parser.feed(response.get_data(as_text=True))
-    assert parser.selected == {"allow_power_on": "false", "allow_shutdown": "false", "allow_reboot": "false"}
+    assert parser.selected == {"allow_power_on": "false", "allow_shutdown": "false", "allow_reboot": "false", "allow_power_off": "false", "allow_power_cycle": "false"}
     assert "without an OS shutdown" in response.get_data(as_text=True)
     assert config_path.read_bytes() == before
 
@@ -315,6 +315,9 @@ def test_dashboard_labels_cpu_sockets_and_shows_reported_battery_health(web, mon
         "alias": "fixture", "ip": "127.0.0.1", "last_updated": "fixture",
         "hottest_cpu_temp_c": 35, "inlet_temp_c": 24, "exhaust_temp_c": None,
         "power_consumption_watts": 70, "target_fan_speed_percent": "Dell Auto",
+        "power_capacity_percent": 7.78, "power_capacity_watts": 900,
+        "power_warning_watts": 896, "power_failure_watts": 980,
+        "intrusion_seen": True, "intrusion_active": False,
         "cpu_temps_c": [35, 32], "cpu_ids": [1, 2], "actual_fan_rpms": [],
         "batteries": [{"name": "CMOS Battery", "health": "Healthy", "voltage": None}],
     }])
@@ -324,3 +327,6 @@ def test_dashboard_labels_cpu_sockets_and_shows_reported_battery_health(web, mon
     assert "CPU1: 35" in text and "CPU2: 32" in text
     assert "CMOS Battery" in text and "Healthy" in text
     assert "None V" not in text
+    assert "7.78% Capacity" in text
+    assert "System Board Intrusion" in text and "Clear" in text
+    assert "Warning Threshold" in text and "896" in text

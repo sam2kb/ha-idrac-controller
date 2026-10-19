@@ -1,3 +1,17 @@
+## 1.0.9 - 2026-10-18
+
+- Show watts alongside capacity used when Dell reports instantaneous power
+  headroom. Expose capacity reference and warning/failure thresholds separately;
+  never use threshold values or combined PSU ratings as the capacity reference.
+- Add System Board Intrusion as a tamper sensor for alerts. Missing readings
+  make it unavailable rather than reporting a clear chassis.
+- Use iDRAC's Power On System, Graceful Shutdown, Reset System (warm boot),
+  Power Cycle System (cold boot), and Power Off System (forced) labels. Every
+  action remains independently disabled by default. Reset is a hard reset;
+  forced off and power cycle bypass OS shutdown.
+- Read optional power details after cooling control, with a five-second timeout
+  and at most one query per minute. Keep unsupported measurements unknown.
+
 ## 1.0.8 - 2026-10-18
 
 - Disable and hide power actions by default for new and existing servers. Add
