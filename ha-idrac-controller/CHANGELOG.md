@@ -1,3 +1,12 @@
+## 1.1.0 - 2026-10-19
+
+- Publish the light UI refresh with responsive dashboards, grouped settings and
+  mobile server actions.
+- Include automatic MQTT setup, in-app save/reload, broader iDRAC 7/8 sensor
+  handling, corrected battery identities and optional advanced diagnostics.
+- Keep Dell automatic cooling as the default for new servers and power actions
+  individually disabled until enabled. Existing saved custom profiles remain active.
+
 ## 1.0.14 - 2026-10-19
 
 - Refresh the web UI with a consistent white/light theme, shared navigation,
