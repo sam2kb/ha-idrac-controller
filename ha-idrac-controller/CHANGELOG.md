@@ -1,3 +1,10 @@
+## 1.1.4 - 2026-10-20
+
+- Stop MQTT reconnects when a server worker exits, including when the broker is already offline. Publish offline availability before disconnect when connected and stop accepting power commands before cleanup.
+- Keep failed workers marked as stopped for the watchdog even if cleanup raises an error. Preserve fan hand-back and monitor-only behavior.
+- Save PID state with a locked, atomic file replacement so simultaneous server shutdowns preserve each server's state and a failed write leaves the previous file intact.
+- Reject new server aliases that would share an existing Home Assistant device ID and MQTT command topics. Existing aliases and entity IDs stay unchanged.
+
 ## 1.1.3 - 2026-10-19
 
 - Clear missing fan RPM in Home Assistant, including retained fan entities when
@@ -176,7 +183,7 @@ First release.
 - Monitor one or more Dell PowerEdge servers with iDRAC 7 or 8 over IPMI.
 - Per-server fan control with simple thresholds, a multi-point curve, or a
   target-temperature PID loop.
-- 2 °C hysteresis, a 5% fan floor, a hand-back to Dell auto when a speed write
+- 2 Â°C hysteresis, a 5% fan floor, a hand-back to Dell auto when a speed write
   fails, and detection of servers that refuse fan control.
 - Optional third-party PCIe cooling response, restored when the app stops.
 - MQTT discovery with CPU, inlet and exhaust temperatures, fan RPM, power,

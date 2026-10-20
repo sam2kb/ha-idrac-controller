@@ -142,3 +142,32 @@ def test_reconciliation_ignores_foreign_core_and_malformed_discovery_before_call
     for candidate, body in cases:
         client._on_message(None, None, SimpleNamespace(topic=candidate, payload=body, retain=True))
     client.discovery_callback.assert_not_called()
+
+
+def test_disconnect_stops_reconnection_even_when_broker_is_already_down():
+    from unittest.mock import Mock
+    client, _ = make_client()
+    client.client = Mock()
+    client._loop_started = True
+    client.is_connected = False
+    client.disconnect()
+    client.client.disconnect.assert_called_once()
+    client.client.loop_stop.assert_called_once()
+    assert client._loop_started is False
+
+
+def test_disconnect_flushes_offline_before_stopping_network_loop():
+    from unittest.mock import Mock
+    client = mqtt_mod.MqttClient(client_id="test")
+    calls = []
+    client.client = Mock()
+    client.is_connected = True
+    client._loop_started = True
+    def publish(*args, **kwargs):
+        calls.append((args, kwargs))
+        return Mock(rc=mqtt_mod.mqtt.MQTT_ERR_SUCCESS)
+    client.client.publish.side_effect = publish
+    client.disconnect()
+    assert all(kwargs.get("qos") == 1 for _, kwargs in calls)
+    client.client.disconnect.assert_called_once()
+    client.client.loop_stop.assert_called_once()

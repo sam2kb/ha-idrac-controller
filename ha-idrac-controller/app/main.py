@@ -3,6 +3,7 @@ import json
 import os
 import re
 import signal
+import tempfile
 import threading
 import time
 
@@ -19,6 +20,7 @@ from . import web_server
 running = True
 threads = []
 status_lock = threading.Lock()
+pid_state_lock = threading.Lock()
 ALL_SERVERS_STATUS = {}
 STATUS_FILE = "/data/current_status.json"
 PID_STATE_FILE = "/data/pid_states.json"
@@ -230,8 +232,10 @@ class ServerWorker:
         finally:
             # Runs on SIGTERM as well as on an unexpected exception, so the
             # fans do not stay in manual mode after the add-on stops.
-            self.cleanup()
-            self.alive = False
+            try:
+                self.cleanup()
+            finally:
+                self.alive = False
 
     def _run_loop(self):
         while self.running and running:
@@ -693,31 +697,50 @@ class ServerWorker:
                 self.mqtt.publish_state("sensor", slug, value, {"attributes": attributes})
 
     def cleanup(self):
-        if self.config.get('fan_control_enabled', True):
-            self._log("info", "Worker shutting down. Reverting to Dell auto fans.")
-            self.ipmi.apply_dell_fan_control_profile()
-        else:
-            self._log("info", "Worker shutting down with fan control disabled; leaving iDRAC fan settings untouched.")
+        # Also applies to unexpected exits, when stop() was never called.
+        self.running = False
+        try:
+            if self.config.get('fan_control_enabled', True):
+                self._log("info", "Worker shutting down. Reverting to Dell auto fans.")
+                self.ipmi.apply_dell_fan_control_profile()
+            else:
+                self._log("info", "Worker shutting down with fan control disabled; leaving iDRAC fan settings untouched.")
 
-        if self._pcie_response_disabled:
-            self._log("info", "Restoring Dell default third-party PCIe cooling response.")
-            if not self.ipmi.set_third_party_pcie_cooling_response(enabled=True):
-                self._log("warning", "Could not restore the third-party PCIe cooling response; it is still disabled.")
+            if self._pcie_response_disabled:
+                self._log("info", "Restoring Dell default third-party PCIe cooling response.")
+                if not self.ipmi.set_third_party_pcie_cooling_response(enabled=True):
+                    self._log("warning", "Could not restore the third-party PCIe cooling response; it is still disabled.")
 
-        if self.mqtt.is_connected:
+        finally:
             self.mqtt.disconnect()
 
-        if os.path.exists(PID_STATE_FILE):
+        # Each server exits on its own thread. Keep the full read/merge/replace
+        # under one lock so simultaneous shutdowns preserve every server state.
+        temporary = None
+        with pid_state_lock:
             try:
-                with open(PID_STATE_FILE, 'r') as f:
-                    all_states = json.load(f)
-            except (IOError, json.JSONDecodeError):
-                all_states = {}
-        else:
-            all_states = {}
-        all_states[self.alias] = self.pid.get_state()
-        with open(PID_STATE_FILE, 'w') as f:
-            json.dump(all_states, f, indent=4)
+                try:
+                    with open(PID_STATE_FILE, 'r') as stream:
+                        all_states = json.load(stream)
+                    if not isinstance(all_states, dict):
+                        all_states = {}
+                except (OSError, json.JSONDecodeError):
+                    all_states = {}
+                all_states[self.alias] = self.pid.get_state()
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                        dir=os.path.dirname(PID_STATE_FILE), prefix=".pid-", delete=False) as stream:
+                    temporary = stream.name
+                    os.chmod(temporary, 0o600)
+                    json.dump(all_states, stream, indent=4)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, PID_STATE_FILE)
+            except OSError:
+                self._log("warning", "Could not save PID state; previous saved state is unchanged.")
+                return
+            finally:
+                if temporary and os.path.exists(temporary):
+                    os.unlink(temporary)
         self._log("info", f"Saved persistent PID state: integral={self.pid.integral}")
 
     def stop(self):

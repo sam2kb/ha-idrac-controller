@@ -5,6 +5,11 @@ import re
 import paho.mqtt.client as mqtt
 
 
+def discovery_alias(server_alias):
+    """Preserve the existing alias-to-topic and device-identifier mapping."""
+    return re.sub(r'[^a-zA-Z0-9_-]+', '_', server_alias)
+
+
 class MqttClient:
     def __init__(self, client_id="ha_idrac_controller"):
         self.client_id = client_id
@@ -48,7 +53,7 @@ class MqttClient:
 
     def set_device_info(self, server_alias, manufacturer, model, ip_address,
                         serial_number=None, sw_version=None):
-        safe_alias = re.sub(r'[^a-zA-Z0-9_-]+', '_', server_alias)
+        safe_alias = discovery_alias(server_alias)
         self.base_topic = f"ha_idrac_controller/{safe_alias}"
         self.availability_topic = f"{self.base_topic}/status"
         self.connection_topic = f"{self.base_topic}/connection"
@@ -167,15 +172,27 @@ class MqttClient:
         return self.is_connected
 
     def disconnect(self):
-        if not self.is_connected:
-            return
-        self.publish(self.availability_topic, "offline", retain=True)
-        self.publish(self.connection_topic, "offline", retain=True)
-        self.client.loop_stop()
-        self._loop_started = False
-        self.client.disconnect()
+        """Stop reconnecting even if the broker disconnected first."""
+        try:
+            if self.is_connected:
+                pending = [self.client.publish(topic, "offline", qos=1, retain=True)
+                           for topic in (self.availability_topic, self.connection_topic)]
+                for message in pending:
+                    if message.rc == mqtt.MQTT_ERR_SUCCESS:
+                        message.wait_for_publish(timeout=2)
+        except (OSError, RuntimeError, ValueError):
+            self._log("warning", "Could not confirm offline availability before disconnect.")
+        finally:
+            # Tell paho to disconnect before joining its thread; otherwise a
+            # network failure can leave an abandoned worker reconnecting.
+            try:
+                self.client.disconnect()
+            finally:
+                if self._loop_started:
+                    self.client.loop_stop()
+                self._loop_started = False
+                self.is_connected = False
         self._log("info", "Gracefully disconnected.")
-        self.is_connected = False
 
     def subscribe(self, topic):
         if not self.is_connected:

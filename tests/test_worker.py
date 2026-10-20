@@ -971,3 +971,65 @@ def test_failed_power_state_query_is_unknown_and_does_not_discard_live_cpu(make_
     run_cycles(item)
     assert main.ALL_SERVERS_STATUS[item.alias]["server_power"] is None
     assert main.ALL_SERVERS_STATUS[item.alias]["cpu_temps_c"] == [30]
+
+
+def test_cleanup_disables_commands_and_disconnects_an_offline_worker(make_worker):
+    item = make_worker(allow_power_on=True, fan_control_enabled=False)
+    item.mqtt.disconnect = Mock()
+    item.mqtt.is_connected = False
+    item.cleanup()
+    item._on_mqtt_message(f"{item.mqtt.base_topic}/command/power_on", "PRESS")
+    assert item.running is False
+    item.mqtt.disconnect.assert_called_once()
+    item.ipmi.chassis_power_on.assert_not_called()
+
+
+def test_pid_save_failure_preserves_previous_state(make_worker, monkeypatch):
+    from pathlib import Path
+    path = Path(main.PID_STATE_FILE)
+    original = '{"other": {"integral": 5}}'
+    path.write_text(original)
+    item = make_worker(fan_control_enabled=False)
+    item.mqtt.disconnect = Mock()
+    def fail(*args, **kwargs):
+        raise OSError("disk full")
+    monkeypatch.setattr(main.json, "dump", fail)
+    item.cleanup()
+    assert path.read_text() == original
+    assert list(path.parent.glob(".pid-*")) == []
+
+
+def test_dead_worker_health_is_updated_even_when_cleanup_fails(make_worker):
+    item = make_worker(fan_control_enabled=False)
+    item._initialize = Mock()
+    item._run_loop = Mock(side_effect=RuntimeError("worker failed"))
+    item.cleanup = Mock(side_effect=RuntimeError("cleanup failed"))
+    with pytest.raises(RuntimeError):
+        item.run()
+    assert item.alive is False
+
+
+def test_cleanup_disconnects_even_if_fan_restore_raises(make_worker):
+    item = make_worker()
+    item.ipmi.apply_dell_fan_control_profile.side_effect = RuntimeError("restore failed")
+    item.mqtt.disconnect = Mock()
+    with pytest.raises(RuntimeError):
+        item.cleanup()
+    item.mqtt.disconnect.assert_called_once()
+    assert item.running is False
+
+
+def test_parallel_cleanup_preserves_all_server_pid_states(make_worker):
+    import json
+    from concurrent.futures import ThreadPoolExecutor
+    from pathlib import Path
+    workers = [make_worker(alias=f"server_{i}", fan_control_enabled=False) for i in range(12)]
+    for i, worker in enumerate(workers):
+        worker.pid.integral = i
+        worker.mqtt.disconnect = Mock()
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        list(pool.map(lambda worker: worker.cleanup(), workers))
+    states = json.loads(Path(main.PID_STATE_FILE).read_text())
+    assert set(states) == {worker.alias for worker in workers}
+    for i, worker in enumerate(workers):
+        assert states[worker.alias]["integral"] == i

@@ -525,3 +525,17 @@ def test_status_json_is_read_under_the_same_lock_as_the_writer(web, monkeypatch,
     monkeypatch.setattr(web_server.json, "load", guarded_load)
     assert web_server.load_all_servers_status(strict=True) == []
     assert not lock.locked()
+
+
+@pytest.mark.parametrize("existing,new", [("rack one", "rack?one"), ("rack_one", "rack/one")])
+def test_new_alias_cannot_share_existing_mqtt_identity(web, existing, new):
+    client, config_path = web
+    saved = json.loads(config_path.read_text())
+    saved[0]["alias"] = existing
+    config_path.write_text(json.dumps(saved))
+    before = config_path.read_bytes()
+    response = client.post("/servers/add", data={"alias": new})
+    assert response.status_code == 302
+    assert config_path.read_bytes() == before
+    with client.session_transaction() as session:
+        assert any(category == "error" for category, _ in session["_flashes"])

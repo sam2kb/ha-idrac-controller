@@ -4,6 +4,7 @@ from waitress import serve
 
 from .fan_logic import FAN_MODES, validate_fan_curve
 from .power_control import POWER_ACTIONS
+from .mqtt_client import discovery_alias
 from http.client import HTTPConnection, HTTPException
 import os
 import re
@@ -221,8 +222,8 @@ def add_server():
     if not new_alias:
         flash("Server alias is required.", "error")
         return redirect('../servers')
-    if any(s['alias'] == new_alias for s in servers):
-        flash(f"Server alias '{new_alias}' already exists.", "error")
+    if any(discovery_alias(s['alias']) == discovery_alias(new_alias) for s in servers):
+        flash("That alias shares a Home Assistant device ID with an existing server. Choose a different alias.", "error")
         return redirect('../servers')
 
     fan_mode = request.form.get('fan_mode') or 'auto'
